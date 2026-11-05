@@ -382,6 +382,15 @@ const legName = l => l.route ? ' (' + l.route + ')' : '';
 // How the pilot gets to / from the job. "car" = driving himself: nothing to book, no calendar event.
 const MODES = [['flight', 'Flight'], ['train', 'Train'], ['car', 'Driving'], ['other', 'Other (bus, ferry\u2026)']];
 const travelMode = f => f.mode || (f.commercial === false ? 'other' : 'flight');
+// Drive end time for the hint / summary: leave time + drive time (hh:mm). Returns '' unless both are set.
+const durText = t => { const m = /^(\d{2}):(\d{2})$/.exec(t || ''); if (!m) return ''; const hh = +m[1], mm = +m[2]; return (hh ? hh + ' h' : '') + (hh && mm ? ' ' : '') + (mm ? mm + ' min' : '') || ''; };
+function driveEnd(f) {
+  const a = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(f.depart || ''), b = /^(\d{2}):(\d{2})$/.exec(f.driveTime || '');
+  if (!a || !b) return '';
+  const st = Date.UTC(+a[1], a[2] - 1, +a[3], +a[4], +a[5]), en = new Date(st + (+b[1] * 60 + +b[2]) * 60000);
+  const hm = en.toISOString().slice(11, 16);
+  return en.toISOString().slice(0, 10) !== new Date(st).toISOString().slice(0, 10) ? hm + ' the next day' : hm;
+}
 const fixTravel = f => { f.mode = travelMode(f); f.commercial = f.mode === 'flight'; return f; };
 const CATS = [['gar', 'Submit GARs'], ['plan', 'File flight plans'], ['handling', 'Handling, fuel & permits'], ['wx', 'Weather & NOTAM briefings'],
   ['out', 'Book outbound travel'], ['ret', 'Book return travel'], ['checkin', 'Check in for flights'],
@@ -471,7 +480,8 @@ function minutesText() {
 }
 function flightHint(f) {
   const fm = travelMode(f);
-  if (fm === 'car') return 'Driving yourself: nothing to book, no calendar event.';
+  if (fm === 'car') return f.depart && f.driveTime ? '\u23F0 Blocked out on the calendar: ' + (f.depart.slice(11, 16)) + ' to ' + driveEnd(f) + '. Nothing to book.'
+    : f.depart ? 'Add the drive time to block out the whole journey (1 h is blocked for now).' : 'Add the time you set off and how long the drive takes, and it is blocked out on the calendar.';
   if (fm !== 'flight') return f.depart ? '\u23F0 A calendar event with a reminder is added for the departure.' : 'Add a departure time to put it on the calendar.';
   if (f.checkedIn) return 'Checked in \u2013 check-in reminders are switched off.';
   return f.depart ? '\u23F0 Calendar reminders set ' + minutesText() + ' before departure.'
@@ -481,7 +491,7 @@ function itemSummary(list, it) {
   if (list === 'flights') {
     const base = [it.flightNo, it.route, it.depart ? fmtDT(it.depart) : ''].filter(Boolean).join(' \u00B7 ') || 'Tap to add details';
     return base + ' \u00B7 ' + (it.booked ? 'Booked \u2713' : 'To book') +
-      (travelMode(it) === 'car' ? ' \u00B7 Driving' : '') + (it.commercial && it.booked ? ' \u00B7 ' + (it.checkedIn ? 'Checked in \u2713' : 'Not checked in') : '');
+      (travelMode(it) === 'car' ? ' \u00B7 Driving' + (it.driveTime ? ' ' + durText(it.driveTime) : '') : '') + (it.commercial && it.booked ? ' \u00B7 ' + (it.checkedIn ? 'Checked in \u2713' : 'Not checked in') : '');
   }
   if (list === 'stays') {
     const n = nightsBetween(it.checkIn, it.checkOut);
@@ -646,7 +656,7 @@ function flightHTML(f) {
     '<div class="item-sub">' + modeSel + ' <span data-checkin' + (f.commercial ? '' : ' hidden') + '><label class="inline"><input type="checkbox" data-f="checkedIn" ' + (f.checkedIn ? 'checked' : '') + '> Checked in <span class="small">(stops the check-in reminders)</span></label></span></div>' +
     (open ? '<div class="item-b">' +
       '<div class="grid2">' + fld('Route', 'data-f="route" placeholder="' + (car ? 'e.g. Home \u2192 EGKB' : 'e.g. LHR \u2192 EDI') + '"', f.route) + (car ? '' : fld(numLabel, 'data-f="flightNo" placeholder="' + (f.mode === 'flight' ? 'e.g. BA1456' : '') + '"', f.flightNo)) + '</div>' +
-      '<div class="grid2">' + fld(car ? 'Leave at (optional)' : 'Departs', 'data-f="depart"', f.depart, 'datetime-local') + (car ? '' : fld('Arrives (optional)', 'data-f="arrive"', f.arrive, 'datetime-local')) + '</div>' +
+      '<div class="grid2">' + fld(car ? 'Set off at' : 'Departs', 'data-f="depart"', f.depart, 'datetime-local') + (car ? fld('Drive time (hh:mm)', 'data-f="driveTime"', f.driveTime, 'time') : fld('Arrives (optional)', 'data-f="arrive"', f.arrive, 'datetime-local')) + '</div>' +
       fld(car ? 'Notes' : 'Booking ref / notes', 'data-f="ref"', f.ref) +
       '<p class="small" data-hint>' + esc(flightHint(f)) + '</p></div>' : '') +
     '</div>';
@@ -908,7 +918,7 @@ function addItem(list, item) {
   scheduleSave(j.id, 100);
   render();
 }
-const newFlight = dir => ({ id: uid(), dir, route: '', flightNo: '', depart: '', arrive: '', ref: '', booked: false, checkedIn: false, mode: 'flight', commercial: true, eventId: '', sig: '' });
+const newFlight = dir => ({ id: uid(), dir, route: '', flightNo: '', depart: '', arrive: '', ref: '', booked: false, checkedIn: false, driveTime: '', mode: 'flight', commercial: true, eventId: '', sig: '' });
 
 function moveToArchive(j) {
   S.active = S.active.filter(x => x.id !== j.id);
