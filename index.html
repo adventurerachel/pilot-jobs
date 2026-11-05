@@ -120,13 +120,14 @@ input[type=checkbox]{width:24px;height:24px;min-height:0;flex:none;accent-color:
 @media (max-width:420px){.grid2{grid-template-columns:1fr}}
 .inline{display:flex;align-items:center;gap:10px;margin:8px 0;min-height:36px}
 .chip{font-size:.88rem;font-weight:600;color:var(--muted)}
-.chip.saved{color:var(--conf)} .chip.error{color:var(--danger)}
+.chip.saved,.chip.confirmed{color:var(--conf)} .chip.error{color:var(--danger)} .chip.tentative{color:var(--tent)}
 .actions{display:flex;flex-wrap:wrap;gap:10px;margin:18px 0}
 .actions .btn{flex:1;min-width:150px}
 
 .next{background:var(--conf-bg);border:1px solid var(--conf);border-radius:12px;padding:12px 14px;margin:14px 0}
 .next b{display:block;font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;color:var(--conf)}
 .sect{margin:22px 0}
+.sect>h4.sub{margin:16px 0 4px;font-size:1rem;color:var(--muted)}
 .sect>h3{display:flex;align-items:center;gap:8px}
 .item{background:var(--card);border:1px solid var(--line);border-radius:12px;margin:8px 0}
 .item.done{border-color:var(--conf)}
@@ -274,6 +275,23 @@ function parisWeekend(ms) {
   const d = new Date(ms).toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'Europe/Paris' });
   return d === 'Sat' || d === 'Sun';
 }
+// ICAO airport codes start with a region prefix: EG = United Kingdom, LF = France. Anything else that looks like an ICAO code is "anywhere else".
+function icaoCountry(code) {
+  const c = String(code || '').trim().toUpperCase();
+  if (!/^[A-Z]{4}$/.test(c)) return '';
+  return c.startsWith('EG') ? 'UK' : c.startsWith('LF') ? 'FR' : 'OTHER';
+}
+const joinRoute = l => l.from && l.to ? l.from + ' \u2192 ' + l.to : (l.from || l.to || '');
+// Older legs stored one "route" string: split "EGKB > LFMN" into the two fields when the page loads them.
+function splitLeg(l) {
+  if (!l.from && !l.to && l.route) {
+    const m = /^\s*([A-Za-z]{4})\s*(?:>|\u2192|-|to)\s*([A-Za-z]{4})\s*$/i.exec(l.route);
+    if (m) { l.from = m[1].toUpperCase(); l.to = m[2].toUpperCase(); }
+  }
+  l.from = l.from || ''; l.to = l.to || ''; l.destManual = !!l.destManual;
+  if (l.to && !l.destManual && icaoCountry(l.to)) l.dest = icaoCountry(l.to);
+  return l;
+}
 // GAR rule from the destination country (set by the pilot's rules). null until a destination is chosen.
 function garRule(l) {
   if (l.dest === 'UK') return { earliest: 48, latest: 0, note: 'UK arrival: GAR no earlier than 48 h before flight time.' };
@@ -349,7 +367,7 @@ const cmp = (a, b) => sortKey(a) < sortKey(b) ? -1 : sortKey(a) > sortKey(b) ? 1
 // ---------- state ----------
 const S = { active: [], archive: [], appUrl: '', calendarName: 'Pilot Jobs', reminders: [1440, 240, 120],
             colours: { tentative: 'orange', confirmed: 'green' },
-            tab: 'active', todoSort: 'date', openId: null, draft: null, needConnect: false, connectError: '', cxUrl: null, loaded: false, error: '', opened: false };
+            tab: 'active', todoSort: 'date', openId: null, draft: null, needConnect: false, connectError: '', cxUrl: null, loaded: false, error: '', opened: false, imp: null };
 const UI = { open: new Set() };
 const saving = {};
 let chip = '';
@@ -359,19 +377,13 @@ const isArchived = j => S.archive.indexOf(j) >= 0;
 
 // ---------- checklist model ----------
 const legName = l => l.route ? ' (' + l.route + ')' : '';
-const CATS = [['out', 'Book outbound flights'], ['stay', 'Book accommodation'], ['gar', 'Submit GARs'],
-  ['plan', 'File flight plans'], ['handling', 'Handling, fuel & permits'], ['wx', 'Weather & NOTAM briefings'],
-  ['ret', 'Book return flights'], ['checkin', 'Check in for flights'], ['after', 'After the job']];
+const CATS = [['gar', 'Submit GARs'], ['plan', 'File flight plans'], ['handling', 'Handling, fuel & permits'], ['wx', 'Weather & NOTAM briefings'],
+  ['out', 'Book outbound flights'], ['ret', 'Book return flights'], ['checkin', 'Check in for flights'],
+  ['stay', 'Book accommodation'], ['after', 'Post-flight tasks']];
 function allChecks(j) {
   const out = [];
   const start = j.startDate || '', end = j.endDate || j.startDate || '';
   const day = s => (s || '').slice(0, 10);
-  j.flights.filter(f => f.dir === 'out').forEach(f =>
-    out.push({ cat: 'out', label: 'Book outbound flight' + (f.route ? ' (' + f.route + ')' : ''), detail: f.route, done: f.booked,
-      list: 'flights', id: f.id, field: 'booked', date: day(f.depart) || start }));
-  j.stays.forEach(s =>
-    out.push({ cat: 'stay', label: 'Book accommodation' + (s.location ? ' \u2013 ' + s.location : ''), detail: s.location, done: s.booked,
-      list: 'stays', id: s.id, field: 'booked', date: s.checkIn || start }));
   j.legs.forEach(l => {
     const d = l.date || start;
     const gw = legWindow(l, 'gar');
@@ -383,12 +395,18 @@ function allChecks(j) {
     out.push({ cat: 'handling', label: 'Arrange handling, fuel & permits' + legName(l), detail: l.route, done: l.handling, list: 'legs', id: l.id, field: 'handling', date: d });
     out.push({ cat: 'wx', label: 'Weather & NOTAM briefing' + legName(l), detail: l.route, done: l.wx, list: 'legs', id: l.id, field: 'wx', date: d });
   });
+  j.flights.filter(f => f.dir === 'out').forEach(f =>
+    out.push({ cat: 'out', label: 'Book outbound flight' + (f.route ? ' (' + f.route + ')' : ''), detail: f.route, done: f.booked,
+      list: 'flights', id: f.id, field: 'booked', date: day(f.depart) || start }));
   j.flights.filter(f => f.dir === 'return').forEach(f =>
     out.push({ cat: 'ret', label: 'Book return flight' + (f.route ? ' (' + f.route + ')' : ''), detail: f.route, done: f.booked,
       list: 'flights', id: f.id, field: 'booked', date: day(f.depart) || end }));
   ['out', 'return'].forEach(dir => j.flights.filter(f => f.dir === dir && f.commercial).forEach(f =>
     out.push({ cat: 'checkin', label: 'Check in for ' + (dir === 'out' ? 'outbound' : 'return') + ' flight' + (f.route ? ' (' + f.route + ')' : ''),
       detail: f.route, done: f.checkedIn, list: 'flights', id: f.id, field: 'checkedIn', date: day(f.depart) || (dir === 'out' ? start : end), when: f.depart })));
+  j.stays.forEach(s =>
+    out.push({ cat: 'stay', label: 'Book accommodation' + (s.location ? ' \u2013 ' + s.location : ''), detail: s.location, done: s.booked,
+      list: 'stays', id: s.id, field: 'booked', date: s.checkIn || start }));
   j.tasks.forEach(t => out.push({ cat: 'after', label: t.label, detail: t.label, done: t.done, list: 'tasks', id: t.id, field: 'done', date: end }));
   return out;
 }
@@ -594,7 +612,8 @@ function renderList(app) {
     '<nav class="tabs"><div class="tab ' + (S.tab === 'active' ? 'on' : '') + '" data-act="tab" data-tab="active">Active (' + (tent.length + conf.length) + ')</div>' +
     '<div class="tab ' + (S.tab === 'todo' ? 'on' : '') + '" data-act="tab" data-tab="todo">To do (' + todoCount + ')</div>' +
     '<div class="tab ' + (S.tab === 'archive' ? 'on' : '') + '" data-act="tab" data-tab="archive">Archive (' + arch.length + ')</div></nav>' +
-    '<main>' + (S.tab === 'archive' ? '' : alertBanner()) + body + '</main>' +
+    '<main>' + (S.tab === 'archive' ? '' : alertBanner()) + body +
+    (S.tab === 'active' ? '<p class="foot"><button class="linkbtn" data-act="import-open">Import jobs from a spreadsheet</button></p>' : '') + '</main>' +
     (window.PILOT_MOCK ? '' : '<p class="foot"><button class="linkbtn" data-act="disconnect">Disconnect this device</button></p>');
 }
 
@@ -630,6 +649,7 @@ function stayHTML(s) {
       fld('Booking ref / notes', 'data-f="ref"', s.ref) + '</div>' : '') +
     '</div>';
 }
+const destNote = l => l.destManual ? 'Country set by hand.' : icaoCountry(l.to) ? 'Worked out from the destination airport ' + l.to + '.' : 'Enter the destination airport above and this is filled in for you.';
 function legHTML(l, i) {
   const cb = (k, label) => '<label class="inline"><input type="checkbox" data-f="' + k + '" ' + (l[k] ? 'checked' : '') + '> ' + label + '</label>';
   const st = fpStatus(l), gs = legStatus(l, 'gar'), gr = garRule(l);
@@ -637,11 +657,12 @@ function legHTML(l, i) {
   return '<div class="item ' + (isDone('legs', l) ? 'done' : '') + '" data-list="legs" data-id="' + l.id + '">' +
     '<div class="item-h"><div class="item-t static"><b>Leg ' + (i + 1) + '</b><span class="sum" data-sum>' + esc(itemSummary('legs', l)) + '</span></div>' +
     '<button class="icon sm" data-act="del" aria-label="Remove leg">\u2715</button></div>' +
-    '<div class="item-b"><div class="grid2">' + fld('Route', 'data-f="route" placeholder="e.g. EGKB \u2192 LFMN"', l.route) +
-    fld('Departure date', 'data-f="date"', l.date, 'date') + '</div>' +
-    fld('Departure time (UTC)', 'data-f="time"', l.time, 'time') +
+    '<div class="item-b"><div class="grid2">' + fld('From (ICAO)', 'data-f="from" maxlength="4" autocapitalize="characters" autocomplete="off" placeholder="e.g. EGKB"', l.from) +
+    fld('To (ICAO)', 'data-f="to" maxlength="4" autocapitalize="characters" autocomplete="off" placeholder="e.g. LFMN"', l.to) + '</div>' +
+    '<div class="grid2">' + fld('Departure date', 'data-f="date"', l.date, 'date') + fld('Departure time (UTC)', 'data-f="time"', l.time, 'time') + '</div>' +
     '<label class="fld"><span>Destination country (sets the GAR rule)</span><select data-f="dest">' +
       '<option value="">Choose\u2026</option>' + opt('UK', 'United Kingdom') + opt('FR', 'France') + opt('OTHER', 'Anywhere else') + '</select></label>' +
+    '<p class="small" data-destnote>' + esc(destNote(l)) + '</p>' +
     cb('gar', 'Submit GAR') +
     '<p class="small" data-garnote>' + esc(gr ? gr.note : '') + '</p>' +
     '<p class="fpstat ' + gs.level + '" data-gar>' + esc(gs.text) + '</p>' +
@@ -669,11 +690,12 @@ function checklistHTML(j) {
   const p = progress(j);
   return '<div class="next"><b>Next up</b><span id="nextUp">' + (p.next ? esc(p.next) : 'All done \u2713') + '</span>' +
       '<div class="track" id="progress"><i style="width:' + p.pct + '%"></i></div><span class="small" id="progText">' + p.done + ' of ' + p.total + ' done</span></div>' +
-    section('1 \u00B7 Outbound travel', j.flights.filter(f => f.dir === 'out').map(flightHTML).join(''), 'No outbound travel to book.', 'add-out', '+ Add outbound flight') +
-    section('2 \u00B7 Accommodation', j.stays.map(stayHTML).join(''), 'No accommodation to book.', 'add-stay', '+ Add accommodation (another location or night)') +
-    section('3 \u00B7 Flights you operate', j.legs.map(legHTML).join(''), 'Add each leg to track its GAR, flight plan, handling/fuel/permits and briefing.', 'add-leg', '+ Add leg') +
-    section('4 \u00B7 Return travel', j.flights.filter(f => f.dir === 'return').map(flightHTML).join(''), 'No return travel to book.', 'add-ret', '+ Add return flight') +
-    '<section class="sect"><h3>5 \u00B7 After the job</h3>' + j.tasks.map(taskHTML).join('') +
+    section('1 \u00B7 Flights you operate', j.legs.map(legHTML).join(''), 'Add each leg to track its GAR, flight plan, handling/fuel/permits and briefing.', 'add-leg', '+ Add leg') +
+    '<section class="sect"><h3>2 \u00B7 Outbound / return travel</h3>' +
+      '<h4 class="sub">Outbound</h4>' + (j.flights.filter(f => f.dir === 'out').map(flightHTML).join('') || '<p class="small">No outbound travel to book.</p>') + '<button class="btn" data-act="add-out">+ Add outbound flight</button>' +
+      '<h4 class="sub">Return</h4>' + (j.flights.filter(f => f.dir === 'return').map(flightHTML).join('') || '<p class="small">No return travel to book.</p>') + '<button class="btn" data-act="add-ret">+ Add return flight</button></section>' +
+    section('3 \u00B7 Accommodation', j.stays.map(stayHTML).join(''), 'No accommodation to book.', 'add-stay', '+ Add accommodation (another location or night)') +
+    '<section class="sect"><h3>4 \u00B7 Post-flight tasks</h3>' + j.tasks.map(taskHTML).join('') +
       '<div class="addtask"><input id="newTask" placeholder="Add your own task" autocomplete="off"><button class="btn" data-act="add-task">Add</button></div></section>';
 }
 
@@ -707,7 +729,7 @@ function renderDetail(app) {
 }
 
 // ---------- new job (tentative by default; tick "Confirmed flight" for the full checklist) ----------
-const newLeg = date => ({ id: uid(), route: '', date: date || '', time: '', dest: 'UK', fpEarliest: '', fpLatest: '', fpNoRule: false, gar: false, plan: false, handling: false, wx: false,
+const newLeg = date => ({ id: uid(), route: '', from: '', to: '', destManual: false, date: date || '', time: '', dest: 'UK', fpEarliest: '', fpLatest: '', fpNoRule: false, gar: false, plan: false, handling: false, wx: false,
   fpDueEventId: '', fpOpenEventId: '', fpSig: '', garDueEventId: '', garOpenEventId: '', garSig: '' });
 function newDraft() {
   return { id: 'draft', status: 'tentative', prevStatus: '', title: '', notes: '', location: '', startDate: '', startTime: '', endDate: '', endTime: '',
@@ -791,7 +813,7 @@ function render() {
       : '<div class="empty">Loading\u2026</div>';
     return;
   }
-  if (S.openId === 'draft') renderNew(app); else if (S.openId) renderDetail(app); else renderList(app);
+  if (S.openId === 'import') renderImport(app); else if (S.openId === 'draft') renderNew(app); else if (S.openId) renderDetail(app); else renderList(app);
   window.scrollTo(0, y);
 }
 
@@ -828,6 +850,18 @@ function onField(e) {
     const it = j[itemEl.dataset.list].find(x => x.id === itemEl.dataset.id);
     if (!it) return;
     it[el.dataset.f] = val;
+    if (itemEl.dataset.list === 'legs') {
+      const f = el.dataset.f;
+      if (f === 'from' || f === 'to') {
+        const up = String(val).toUpperCase().replace(/[^A-Z]/g, ''); if (up !== val) el.value = up;
+        it[f] = up; it.route = joinRoute(it);
+        if (f === 'to' && icaoCountry(up)) {            // a new destination: infer the country again
+          it.dest = icaoCountry(up); it.destManual = false;
+          const sel = itemEl.querySelector('[data-f=dest]'); if (sel) sel.value = it.dest;
+        }
+      } else if (f === 'dest') it.destManual = true;
+      const dn = itemEl.querySelector('[data-destnote]'); if (dn) dn.textContent = destNote(it);
+    }
   } else {
     j[el.dataset.f] = val;
   }
@@ -875,6 +909,10 @@ function replaceActive(job) {
 const actions = {
   'new'() { S.draft = newDraft(); S.openId = 'draft'; window.scrollTo(0, 0); render(); },
   'save-new'() { saveDraft(); },
+  'import-open'() { S.imp = null; S.openId = 'import'; window.scrollTo(0, 0); render(); },
+  'import-close'() { S.imp = null; S.openId = null; render(); },
+  'import-pick'() { $('#impFile').click(); },
+  'import-go'() { importGo(); },
   refresh() { load(); },
   async connect() {
     const url = ($('#cxUrl').value || '').trim(), key = $('#cxKey').value;
@@ -1010,6 +1048,161 @@ document.addEventListener('change', e => {
   render();
 });
 
+// ---------- import jobs from a spreadsheet (.xlsx / .csv, made from the template) ----------
+// The file is read in this browser (SheetJS, loaded from cdnjs only when needed); nothing is sent anywhere
+// except the finished jobs, which go to your own Apps Script exactly like jobs typed in by hand.
+const XLSX_URL = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+const IMPORT_MAX_JOBS = 25;
+const HEAD_KEYS = { job: ['job', 'jobtitle', 'title', 'trip'], status: ['status'], date: ['date', 'departuredate'],
+  time: ['time', 'timeutc', 'departuretime', 'departuretimeutc'], from: ['from', 'fromicao', 'origin'], to: ['to', 'toicao', 'destination'], notes: ['notes', 'note'] };
+const isoDate = (y, m, d) => {
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d
+    ? y + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0') : null;
+};
+// A date cell is either an Excel serial number or text (2026-11-10 or UK style 10/11/2026). Returns '' for blank, null for unreadable.
+function cellDate(v) {
+  if (v === '' || v == null) return '';
+  if (v instanceof Date) return isNaN(v) ? null : isoDate(v.getFullYear(), v.getMonth() + 1, v.getDate());
+  if (typeof v === 'number') { const d = new Date(Date.UTC(1899, 11, 30) + Math.floor(v) * 864e5); return v >= 1 ? isoDate(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate()) : null; }
+  const s = String(v).trim(); let m;
+  if ((m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s))) return isoDate(+m[1], +m[2], +m[3]);
+  if ((m = /^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2}|\d{4})$/.exec(s))) return isoDate(m[3].length === 2 ? 2000 + +m[3] : +m[3], +m[2], +m[1]);
+  return null;
+}
+// A time cell is an Excel time (a fraction of a day) or text (09:00, 0900, 9.30, 09:00Z). Returns '' for blank, null for unreadable.
+function cellTime(v) {
+  if (v === '' || v == null) return '';
+  const hm = (h, m) => h < 24 && m < 60 ? String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0') : null;
+  if (typeof v === 'number') { const mins = Math.round((v - Math.floor(v)) * 1440) % 1440; return hm(Math.floor(mins / 60), mins % 60); }
+  const m = /^(\d{1,2})\s*[:.h]?\s*(\d{2})(?::\d{2})?\s*z?$/i.exec(String(v).trim());
+  return m ? hm(+m[1], +m[2]) : null;
+}
+const normHead = s => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+// rows = what SheetJS gives for a sheet: one object per row, keyed by the header text.
+function parseImport(rows) {
+  const issues = [], groups = [], byKey = {};
+  const colOf = {};
+  if (rows.length) Object.keys(rows[0]).forEach(h => { const n = normHead(h); Object.keys(HEAD_KEYS).forEach(k => { if (!colOf[k] && HEAD_KEYS[k].includes(n)) colOf[k] = h; }); });
+  if (!colOf.from || !colOf.to) return { groups: [], issues: ['I couldn’t find the “From” and “To” columns. Please use the template (the first row must be its headings).'], read: 0 };
+  const get = (r, k) => colOf[k] ? r[colOf[k]] : '';
+  let last = '', read = 0;
+  rows.forEach((r, i) => {
+    const n = i + 2;                                                      // spreadsheet row number (row 1 is the headings)
+    if (Object.keys(colOf).every(k => String(get(r, k)).trim() === '')) return;
+    read++;
+    const from = String(get(r, 'from')).trim().toUpperCase(), to = String(get(r, 'to')).trim().toUpperCase();
+    const date = cellDate(get(r, 'date')), time = cellTime(get(r, 'time'));
+    const bad = [];
+    if (!/^[A-Z]{4}$/.test(from)) bad.push('From must be a 4-letter ICAO code');
+    if (!/^[A-Z]{4}$/.test(to)) bad.push('To must be a 4-letter ICAO code');
+    if (date === null) bad.push('the date isn’t readable');
+    if (time === null) bad.push('the time isn’t readable');
+    if (bad.length) { issues.push('Row ' + n + ' skipped: ' + bad.join(', ') + '.'); return; }
+    let title = String(get(r, 'job')).trim() || last; last = title;
+    if (!title) title = 'Imported job';
+    const key = title.toLowerCase();
+    let g = byKey[key];
+    if (!g) { g = byKey[key] = { title: title, status: '', notes: '', legs: [] }; groups.push(g); }
+    const st = String(get(r, 'status')).trim().toLowerCase();
+    if (st && !g.status) {
+      if (/^(c|conf)/.test(st)) g.status = 'confirmed'; else if (/^(t|tent)/.test(st)) g.status = 'tentative';
+      else issues.push('Row ' + n + ': status “' + get(r, 'status') + '” isn’t Confirmed or Tentative – treated as Confirmed.');
+    }
+    const note = String(get(r, 'notes')).trim(); if (note && !g.notes.includes(note)) g.notes += (g.notes ? '\n' : '') + note;
+    if (date === '') issues.push('Row ' + n + ': no date, so deadlines can’t be worked out for this leg.');
+    g.legs.push({ from: from, to: to, date: date, time: time });
+  });
+  groups.forEach(g => {
+    g.status = g.status || 'confirmed';
+    const ds = g.legs.map(l => l.date).filter(Boolean).sort();
+    g.start = ds[0] || ''; g.end = ds[ds.length - 1] || ''; g.pick = true;
+    g.dup = S.active.some(j => (j.title || '').toLowerCase() === g.title.toLowerCase() && (j.startDate || '') === g.start);
+    if (g.dup) g.pick = false;
+  });
+  return { groups: groups, issues: issues, read: read };
+}
+// What createJob() receives: confirmed jobs get a full starting checklist with the legs filled in; tentative jobs keep the legs in their notes.
+function importPayload(g) {
+  const data = { title: g.title, status: g.status, notes: g.notes, location: '', startDate: g.start, endDate: g.end || g.start, startTime: '', endTime: '' };
+  if (g.status === 'confirmed') {
+    data.flights = [newFlight('out'), newFlight('return')];
+    data.stays = [{ id: uid(), location: '', checkIn: g.start, checkOut: g.end || g.start, ref: '', booked: false }];
+    data.legs = g.legs.map(l => Object.assign(newLeg(l.date), { from: l.from, to: l.to, route: l.from + ' > ' + l.to, time: l.time, dest: icaoCountry(l.to) || 'UK' }));
+    data.tasks = [{ id: uid(), label: 'Send invoice', done: false }, { id: uid(), label: 'Log expenses and receipts', done: false }];
+  } else {
+    data.notes = [g.notes].concat(g.legs.map(l => l.from + ' > ' + l.to + (l.date ? ' ' + l.date : '') + (l.time ? ' ' + l.time + 'Z' : ''))).filter(Boolean).join('\n');
+  }
+  return data;
+}
+function loadXlsxLib() {
+  if (window.XLSX) return Promise.resolve();
+  return new Promise((ok, fail) => {
+    const s = document.createElement('script'); s.src = XLSX_URL;
+    s.onload = ok; s.onerror = () => fail(new Error('Couldn’t load the spreadsheet reader – check your connection and try again.'));
+    document.head.appendChild(s);
+  });
+}
+async function importFile(file) {
+  S.imp = { name: file.name, groups: [], issues: [], read: 0, error: '', ready: false };
+  render();
+  try {
+    await loadXlsxLib();
+    const wb = window.XLSX.read(await file.arrayBuffer(), { type: 'array' });
+    const name = wb.SheetNames.find(n => /^legs$/i.test(n)) || wb.SheetNames[0];
+    const rows = window.XLSX.utils.sheet_to_json(wb.Sheets[name], { defval: '', raw: true });
+    Object.assign(S.imp, parseImport(rows), { ready: true });
+  } catch (e) { S.imp.error = e.message || String(e); }
+  render();
+}
+function renderImport(app) {
+  const imp = S.imp;
+  const head = '<header class="bar"><button class="btn ghost" data-act="import-close">← Jobs</button><b>Import jobs</b></header>';
+  let body = '<section class="sect"><p>Fill in the template, then choose the file here. Each different <b>Job title</b> becomes one job; each row is one flight leg.</p>' +
+    '<p><a class="btn" href="pilot-jobs-import-template.xlsx" download>Download the template</a></p>' +
+    '<p class="small">Using Google Sheets? Copy the template into Sheets, fill it in, then <b>File → Download → Microsoft Excel (.xlsx)</b> (on the phone app: Share &amp; export → Save as Excel). A .csv file works too.</p>' +
+    '<input type="file" id="impFile" accept=".xlsx,.xls,.csv" hidden>' +
+    '<button class="btn primary" data-act="import-pick">' + (imp ? 'Choose a different file' : 'Choose spreadsheet') + '</button></section>';
+  if (imp) {
+    if (imp.error) body += '<p class="fpstat late">' + esc(imp.error) + '</p>';
+    if (!imp.ready && !imp.error) body += '<p class="small">Reading ' + esc(imp.name) + '…</p>';
+    if (imp.ready) {
+      body += '<h2 class="sec">' + esc(imp.name) + ' <small>' + imp.groups.length + ' job' + (imp.groups.length === 1 ? '' : 's') + ', ' + imp.read + ' row' + (imp.read === 1 ? '' : 's') + '</small></h2>';
+      if (!imp.groups.length) body += '<div class="empty">No jobs found in that file.</div>';
+      body += imp.groups.map((g, i) => '<div class="item"><div class="item-h"><label class="inline"><input type="checkbox" data-imp="' + i + '" ' + (g.pick ? 'checked' : '') + '> <b>' + esc(g.title) + '</b></label>' +
+        '<span class="chip ' + g.status + '">' + g.status + '</span></div><div class="item-sub">' +
+        (g.dup ? '<p class="fpstat prompt">Looks like a job you already have (same title and start date), so it’s unticked.</p>' : '') +
+        g.legs.map(l => '<div class="small">' + esc(l.from + ' → ' + l.to) + ' · ' + esc(l.date ? fmtDate(l.date) : 'no date') + (l.time ? ' ' + l.time + 'Z' : '') +
+          (g.status === 'confirmed' ? ' · GAR rule: ' + ({ UK: 'UK', FR: 'France', OTHER: 'none' }[icaoCountry(l.to)] || 'UK') : '') + '</div>').join('') +
+        (g.status === 'tentative' ? '<div class="small">Tentative: the legs are saved in the notes.</div>' : '') + '</div></div>').join('');
+      if (imp.issues.length) body += '<section class="sect"><h3>Check these</h3>' + imp.issues.map(t => '<p class="fpstat prompt">' + esc(t) + '</p>').join('') + '</section>';
+      const n = imp.groups.filter(g => g.pick).length;
+      if (imp.groups.length) body += '<p class="small" id="impErr"></p><button class="btn primary block" data-act="import-go" ' + (n ? '' : 'disabled') + ' id="impGo">Import ' + n + ' job' + (n === 1 ? '' : 's') + '</button>';
+    }
+  }
+  app.innerHTML = head + '<main>' + body + '</main>';
+}
+async function importGo() {
+  const imp = S.imp, picks = imp.groups.filter(g => g.pick), err = $('#impErr');
+  if (picks.length > IMPORT_MAX_JOBS) { err.textContent = 'Please import at most ' + IMPORT_MAX_JOBS + ' jobs at a time.'; return; }
+  let done = 0;
+  await busy(async () => {
+    for (const g of picks) {
+      try { const job = await api('createJob', importPayload(g)); S.active.push(job); g.pick = false; g.imported = true; done++; }
+      catch (e) { imp.error = 'Imported ' + done + ' of ' + picks.length + '. Stopped at “' + g.title + '”: ' + e.message; break; }
+    }
+  });
+  if (imp.error) { imp.groups = imp.groups.filter(g => !g.imported); render(); return; }
+  S.imp = null; S.openId = null; S.tab = 'active'; render();
+  toast('Imported ' + done + ' job' + (done === 1 ? '' : 's') + ' – confirmed ones are on your calendar', '');
+}
+if (window.PILOT_MOCK) window.PILOT_TEST = { parseImport, cellDate, cellTime, importFile };   // lets the automated tests reach the import helpers
+document.addEventListener('change', e => {
+  const el = e.target;
+  if (el.id === 'impFile' && el.files && el.files[0]) importFile(el.files[0]);
+  if (el.dataset && el.dataset.imp !== undefined && S.imp) { S.imp.groups[+el.dataset.imp].pick = el.checked; render(); }
+});
+
 // ---------- boot ----------
 // fromConnect = true when the person has just typed an address/passcode, so any failure goes back to that form
 async function load(fromConnect) {
@@ -1020,6 +1213,7 @@ async function load(fromConnect) {
   try {
     const r = await api('getAll');
     S.active = r.active; S.archive = r.archive; S.appUrl = r.appUrl;
+    S.active.concat(S.archive).forEach(j => (j.legs || []).forEach(splitLeg));
     S.calendarName = r.calendarName; S.reminders = r.reminderMinutes; S.colours = r.colours;
     S.loaded = true; S.error = ''; S.needConnect = false; S.connectError = '';
     if (OPEN_JOB_ID && !S.opened) { S.opened = true; if (findJob(OPEN_JOB_ID)) S.openId = OPEN_JOB_ID; }
