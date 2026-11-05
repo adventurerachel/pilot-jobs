@@ -1,884 +1,1255 @@
-/**
- * Pilot Jobs - backend (Google Apps Script web app)
- *
- * - Jobs live in a Google Sheet ("Jobs" = active, "Archive" = cancelled / completed).
- * - Each job with a start date gets an event on a Google Calendar:
- *     tentative = orange, confirmed = green.
- * - Commercial positioning flights get their own calendar event with
- *   popup + email reminders (24 h, 4 h and 2 h before departure by default).
- * - Cancelling a job deletes its calendar events and moves the job to the Archive sheet.
- *
- * HOW THE PAGE TALKS TO THIS SCRIPT
- * The page (index.html) is hosted on ordinary web hosting, not by Apps Script. It sends each request to this
- * script's web app URL as a small JSON message, and this script answers with JSON. Every request must include a
- * passcode (stored in Script Properties as API_PASSCODE). See "Web app entry points" below for the details.
- *
- * Functions whose names end in "_" are private helpers.
- */
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pilot Jobs</title>
+<meta name="theme-color" content="#2a86da">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Pilot Jobs">
+<style>
+:root{
+  --bg:#f5f6f8; --card:#fff; --text:#1c2330; --muted:#667085; --line:#e1e5ec;
+  --primary:#1a56db; --primary-text:#fff;
+  --tent:#c2610a; --tent-bg:#fff1e0;
+  --conf:#188038; --conf-bg:#e4f4ea; --good-text:#fff;
+  --danger:#c5221f; --warn:#b45309;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#0f1319; --card:#171c25; --text:#e8ecf2; --muted:#9aa4b2; --line:#283040;
+    --primary:#5b95ff; --primary-text:#0b1220;
+    --tent:#f4a14d; --tent-bg:#2b2012;
+    --conf:#5fd08a; --conf-bg:#122a1a; --good-text:#0b1d12;
+    --danger:#ff7b75; --warn:#f4b24d;
+  }
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%;font-size:100%}
+/* Everything is sized in rem, so changing this one number scales the whole page.
+   Phones are held close but have small CSS-pixel widths, so they get a larger base. */
+@media (max-width:900px){html{font-size:106.25%}}
+@media (max-width:600px){html{font-size:112.5%}}
+@media (max-width:380px){.tab{font-size:.88rem;padding:9px 4px}}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:1rem/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+#app{max-width:780px;margin:0 auto;padding:0 14px 90px}
+h1{font-size:1.25rem;margin:0}
+h2.sec{font-size:1rem;margin:22px 0 4px;display:flex;align-items:center;gap:8px}
+h2.sec small{color:var(--muted);font-weight:500}
+h3{font-size:1rem;margin:0 0 6px}
+.dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+.dot.tentative{background:var(--tent)} .dot.confirmed{background:var(--conf)}
+.small{font-size:.9rem;color:var(--muted)}
+.warn{color:var(--warn);font-weight:600}
+.bar{position:sticky;top:0;z-index:5;background:var(--bg);display:flex;align-items:center;
+  justify-content:space-between;gap:10px;padding:12px 0 10px;border-bottom:1px solid var(--line)}
+.bar-actions{display:flex;gap:8px;align-items:center}
 
-const CONFIG = {
-  APP_TITLE: 'Pilot Jobs',
+.btn{border:1px solid var(--line);background:var(--card);color:var(--text);border-radius:10px;
+  padding:10px 14px;font:inherit;font-weight:600;min-height:44px;cursor:pointer}
+.btn.primary{background:var(--primary);color:var(--primary-text);border-color:transparent}
+.btn.good{background:var(--conf);color:var(--good-text);border-color:transparent}
+.btn.danger{color:var(--danger);border-color:var(--danger);background:transparent}
+.btn.ghost{background:transparent;border-color:transparent}
+.btn.block{width:100%}
+.icon{border:0;background:transparent;color:var(--muted);font-size:1.1rem;min-width:44px;min-height:44px;cursor:pointer;border-radius:10px}
+.icon.sm{min-width:40px;min-height:40px;font-size:1rem}
+body.busy .btn,body.busy .icon{pointer-events:none;opacity:.6}
 
-  // Calendar to use. Created automatically if it doesn't exist.
-  // Set to '' to use the default (primary) calendar instead.
-  CALENDAR_NAME: 'Pilot Jobs',
+.tabs{display:flex;gap:6px;margin:12px 0 0}
+.tab{flex:1;text-align:center;padding:9px;border-radius:10px;border:1px solid var(--line);
+  background:var(--card);font-weight:600;cursor:pointer;color:var(--muted)}
+.tab.on{color:var(--text);border-color:var(--primary);box-shadow:inset 0 0 0 1px var(--primary)}
 
-  // Where the "new job" summary email goes. '' = the account that owns this script.
-  // Several addresses can be comma-separated.
-  EMAIL_TO: '',
-  EMAIL_NEW_JOB: true,
+.card{background:var(--card);border:1px solid var(--line);border-left:5px solid var(--line);
+  border-radius:12px;padding:12px 14px;margin:10px 0;cursor:pointer}
+.card.tentative{border-left-color:var(--tent)} .card.confirmed{border-left-color:var(--conf)}
+.card .t{font-weight:700;margin:0 0 2px;overflow-wrap:anywhere}
+.card .meta{font-size:.95rem;color:var(--muted)}
+.snippet{font-size:.95rem;color:var(--muted);margin-top:4px;display:-webkit-box;
+  -webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-line}
+.track{height:6px;background:var(--line);border-radius:6px;overflow:hidden;margin:8px 0 4px}
+.track i{display:block;height:100%;background:var(--conf);transition:width .25s}
+.alert{background:var(--tent-bg);border:1px solid var(--danger);border-radius:12px;padding:10px 14px;margin:14px 0 4px}
+.alert>b{color:var(--danger)}
+.alert-row{padding:8px 0;border-top:1px solid var(--line);cursor:pointer;display:flex;flex-direction:column;gap:2px;margin-top:6px;min-height:44px;justify-content:center}
+.alert-row:first-of-type{border-top:0}
+.alert-row small{font-size:.9rem}
+.fprule{border:1px solid var(--line);border-radius:10px;padding:8px 12px 10px;margin:8px 0;background:var(--bg)}
+.fpstat{font-size:.9rem;margin:6px 0 0;color:var(--muted)}
+.fpstat.late,.alert-row small.late{color:var(--danger);font-weight:700}
+.fpstat.soon,.alert-row small.soon{color:var(--danger);font-weight:600}
+.fpstat.prompt{color:var(--warn);font-weight:600}
+.fpstat.open{color:var(--conf)} .fpstat.ok{color:var(--conf);font-weight:600}
+.confirmtick{display:flex;gap:12px;align-items:center;background:var(--conf-bg);border:1px solid var(--conf);border-radius:12px;padding:12px 14px;margin:8px 0 14px;cursor:pointer}
+.confirmtick span{display:flex;flex-direction:column}
+.confirmtick small{color:var(--muted);font-size:.88rem}
+.connect{max-width:440px;margin:0 auto;padding-top:48px}
+.connect h1{margin-bottom:8px}
+.foot{text-align:center;margin:28px 0 0}
+.linkbtn{background:none;border:0;color:var(--muted);font:inherit;font-size:.9rem;text-decoration:underline;cursor:pointer;min-height:44px;padding:8px 14px}
+[hidden]{display:none !important}
+.item-sub{padding:0 14px 8px}
+.item-sub select{font:inherit;padding:.3rem .4rem;border-radius:8px;border:1px solid var(--line);background:var(--card);color:inherit;margin-left:.3rem}
+.modeicon{font-size:1.4rem;width:1.8rem;text-align:center}
+.tabs.sub{margin:12px 0 0}
+.tabs.sub .tab{padding:7px;font-size:.9rem}
+.todo{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:6px 12px;margin:8px 0}
+.todo.done{opacity:.5}
+.todo.done b{text-decoration:line-through}
+.todo-t{flex:1;cursor:pointer;min-height:44px;display:flex;flex-direction:column;justify-content:center;overflow-wrap:anywhere}
+.todo-t .sum{font-size:.9rem;color:var(--muted)}
+.empty{text-align:center;color:var(--muted);padding:48px 10px}
+.badge{display:inline-block;font-size:.78rem;font-weight:700;padding:2px 9px;border-radius:999px;
+  text-transform:uppercase;letter-spacing:.03em}
+.badge.tentative{background:var(--tent-bg);color:var(--tent)}
+.badge.confirmed,.badge.completed{background:var(--conf-bg);color:var(--conf)}
+.badge.cancelled{background:var(--line);color:var(--muted)}
+.cardhead{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
 
-  // Address of the hosted page (where you put index.html). Used for the "Open checklist" links in calendar
-  // events and emails. '' = no links. Example: 'https://yourname.github.io/pilot-jobs/'
-  APP_URL: '',
+.detail{padding-top:14px}
+.fld{display:block;margin:10px 0}
+.fld>span{display:block;font-size:.88rem;font-weight:600;color:var(--muted);margin-bottom:3px}
+input,textarea,select{width:100%;font:inherit;padding:10px 12px;border:1px solid var(--line);
+  border-radius:10px;background:var(--card);color:var(--text);min-height:44px}
+textarea{resize:vertical}
+input[type=checkbox]{width:24px;height:24px;min-height:0;flex:none;accent-color:var(--conf);margin:0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+@media (max-width:420px){.grid2{grid-template-columns:1fr}}
+.inline{display:flex;align-items:center;gap:10px;margin:8px 0;min-height:36px}
+.chip{font-size:.88rem;font-weight:600;color:var(--muted)}
+.chip.saved,.chip.confirmed{color:var(--conf)} .chip.error{color:var(--danger)} .chip.tentative{color:var(--tent)}
+.actions{display:flex;flex-wrap:wrap;gap:10px;margin:18px 0}
+.actions .btn{flex:1;min-width:150px}
 
-  // Passcode protection. The passcode itself is NOT written here: it lives in Script Properties (API_PASSCODE).
-  // After this many wrong attempts in a row, ALL requests are refused for AUTH_LOCKOUT_SECONDS.
-  AUTH_MAX_FAILURES: 10,
-  AUTH_LOCKOUT_SECONDS: 300,
+.next{background:var(--conf-bg);border:1px solid var(--conf);border-radius:12px;padding:12px 14px;margin:14px 0}
+.next b{display:block;font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;color:var(--conf)}
+.sect{margin:22px 0}
+.sect>h4.sub{margin:16px 0 4px;font-size:1rem;color:var(--muted)}
+.sect>h3{display:flex;align-items:center;gap:8px}
+.item{background:var(--card);border:1px solid var(--line);border-radius:12px;margin:8px 0}
+.item.done{border-color:var(--conf)}
+.item-h{display:flex;align-items:center;gap:8px;padding:6px 6px 6px 12px}
+.item-t{flex:1;text-align:left;background:none;border:0;color:inherit;font:inherit;padding:4px 0;
+  cursor:pointer;min-height:44px;display:flex;flex-direction:column;justify-content:center}
+.item-t.static{cursor:default}
+.item-t .sum{font-size:.9rem;color:var(--muted);font-weight:400;overflow-wrap:anywhere}
+.item.done .item-t b{color:var(--muted);text-decoration:line-through}
+.item-b{padding:4px 12px 12px;border-top:1px solid var(--line)}
+.sect>.btn{margin-top:4px}
+.addtask{display:flex;gap:8px;margin-top:6px}
+.addtask input{flex:1}
 
-  // Check-in reminders for commercial flights, in minutes before departure.
-  FLIGHT_REMINDER_MINUTES: [1440, 240, 120],   // 24 h, 4 h, 2 h before departure
-  DRIVE_REMINDER_MINUTES: [60],                // driving: one popup this many minutes before setting off
-  TRAVEL_REMINDER_MINUTES: [120],              // trains and other travel: one popup this many minutes before departure
-  EMAIL_FLIGHT_REMINDERS: true,        // also email the reminders, not just popups
-  FLIGHT_DEFAULT_MINUTES: 120,         // calendar duration if no arrival time is given
+dialog{border:1px solid var(--line);border-radius:16px;background:var(--card);color:var(--text);
+  width:min(540px,calc(100vw - 24px));padding:16px 16px 14px;max-height:92vh;overflow:auto}
+dialog::backdrop{background:rgba(0,0,0,.5)}
+dialog h3{font-size:1.1rem;margin:0 0 8px}
+.row{display:flex;flex-wrap:wrap;gap:10px;justify-content:flex-end;margin-top:14px}
+details summary{cursor:pointer;color:var(--muted);font-size:.9rem;margin:10px 0 0}
+#toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);max-width:92vw;background:#1f2937;
+  color:#fff;padding:11px 16px;border-radius:12px;font-size:.92rem;opacity:0;pointer-events:none;
+  transition:opacity .2s;z-index:50;text-align:center}
+#toast.on{opacity:1} #toast.err{background:#b42318}
+</style>
+</head>
+<body>
+<div id="app"></div>
 
-  // Flight plan and GAR deadline reminders (minutes before the deadline). Each leg's deadline gets its
-  // own calendar event until the matching box is ticked, then it is removed.
-  // Popups arrive as push notifications in the Google Calendar app (e.g. on a Pixel). The 15-minute one is
-  // the "very close" alert. Google Calendar allows 5 reminders per event: popups first, then one email.
-  FLIGHT_PLAN_REMINDER_MINUTES: [1440, 360, 60, 15],
-  GAR_REMINDER_MINUTES: [1440, 360, 60, 15],
-  EMAIL_FLIGHT_PLAN_REMINDERS: true,   // also email the earliest reminder (applies to GARs too)
 
-  // Names from CalendarApp.EventColor
-  COLOURS: { tentative: 'ORANGE', confirmed: 'GREEN', completed: 'PALE_GREEN', flight: 'BLUE',
-             flightPlanDue: 'RED', flightPlanOpen: 'YELLOW' }
+<dialog id="confirmDlg">
+  <form method="dialog">
+    <h3 id="cfTitle"></h3>
+    <p id="cfText"></p>
+    <div class="row">
+      <button class="btn ghost" value="cancel">Go back</button>
+      <button class="btn primary" id="cfOk" value="ok"></button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast"></div>
+
+<script>
+(function () {
+'use strict';
+
+// A link like  .../index.html?job=ABC123  (from a calendar event or email) opens that job once connected
+const OPEN_JOB_ID = (new URLSearchParams(location.search).get('job') || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 32);
+
+// ---------- helpers ----------
+const $ = (s, r) => (r || document).querySelector(s);
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const uid = () => 'i' + Math.random().toString(36).slice(2, 10);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const THIS_YEAR = new Date().getFullYear();
+
+// ---------- talking to the backend ----------
+// This page is plain web hosting; it does not run inside Google. To read or change anything it sends a small
+// JSON message to the Apps Script "web app" address and reads the JSON reply. Two things are remembered in this
+// browser (localStorage): the web app address, and the passcode the server checks on every request.
+const CFG_KEY = 'pilotjobs.config';
+const URL_OK = /^https:\/\/script\.google\.com\/(?:a\/macros\/[^/]+|macros)\/s\/[\w-]+\/exec$/;
+let memCfg = null;   // used if the browser won't let us use localStorage (some private windows)
+function getCfg() {
+  if (memCfg) return memCfg;
+  try { const c = JSON.parse(localStorage.getItem(CFG_KEY) || 'null'); return c && c.url ? c : null; } catch (e) { return null; }
+}
+function setCfg(c) { memCfg = c; try { localStorage.setItem(CFG_KEY, JSON.stringify(c)); } catch (e) { /* kept in memory only */ } }
+function clearCfg() { memCfg = null; try { localStorage.removeItem(CFG_KEY); } catch (e) { /* nothing to clear */ } }
+
+const API_MSG = {
+  auth: 'That passcode wasn’t accepted.',
+  locked: 'Too many wrong attempts. Wait a few minutes, then try again.',
+  not_configured: 'The server has no passcode yet. Add the API_PASSCODE script property (see the setup guide).',
+  bad_request: 'The server didn’t understand that request. Is the page up to date?'
 };
 
-const JOB_HEADERS_ = ['id', 'status', 'title', 'start', 'end', 'updated / archived', 'data (json)'];
-
-// ---------------------------------------------------------------------------
-// Web app entry points
-// ---------------------------------------------------------------------------
-
-/**
- * The ONLY functions the API will run. A request names a function as text ("getAll"); we look it up in this
- * table and refuse anything that is not listed. We never run a function just because a request names it,
- * otherwise a caller could ask for setup(), or for any internal helper.
- */
-const API_FUNCTIONS_ = { getAll: getAll, createJob: createJob, saveJob: saveJob, setStatus: setStatus };
-
-/**
- * GET: just proves the API is alive when you open the address in a browser.
- * It deliberately serves no page and no data. (A page served from here would run as the pilot for anyone
- * who opened it, which would bypass the passcode.)
- */
-function doGet() {
-  return json_({ ok: true, app: 'Pilot Jobs API', note: 'Open the Pilot Jobs page, not this address, to use the app.' });
-}
-
-/**
- * POST: every real request. The body is JSON text:  {"fn": "getAll", "args": [], "key": "<passcode>"}
- * Reply (always JSON):  {"ok": true, "result": ...}   or   {"ok": false, "error": "<code>", ...}
- * error codes: bad_request, not_configured, auth (wrong passcode), locked (too many wrong tries), server
- */
-function doPost(e) {
-  let req;
-  try { req = JSON.parse((e && e.postData && e.postData.contents) || ''); } catch (err) { req = null; }
-  if (!req || typeof req.fn !== 'string') return json_({ ok: false, error: 'bad_request' });
-
-  // "ping" needs no passcode. It lets the page check the address is right before asking for the passcode.
-  if (req.fn === 'ping') return json_({ ok: true, result: 'pong' });
-
-  const auth = checkPasscode_(req.key);
-  if (auth !== 'ok') return json_({ ok: false, error: auth });
-
-  // hasOwnProperty stops names like "constructor" or "__proto__" from sneaking through the lookup
-  if (!Object.prototype.hasOwnProperty.call(API_FUNCTIONS_, req.fn)) return json_({ ok: false, error: 'bad_request' });
-
+async function api(fn) {
+  const args = Array.prototype.slice.call(arguments, 1);
+  if (window.PILOT_MOCK) return window.PILOT_MOCK(fn, args);          // preview.html only: fake in-memory server
+  const cfg = getCfg();
+  if (!cfg || !cfg.key) { const e = new Error('Not connected.'); e.code = 'auth'; throw e; }
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 45000);
+  let data;
   try {
-    const result = API_FUNCTIONS_[req.fn].apply(null, Array.isArray(req.args) ? req.args : []);
-    return json_({ ok: true, result: result });
-  } catch (err) {
-    return json_({ ok: false, error: 'server', message: String(err && err.message ? err.message : err) });
-  }
-}
-
-function json_(obj) {
-  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
-}
-
-// ---- passcode ----
-
-function passcode_() {
-  return PropertiesService.getScriptProperties().getProperty('API_PASSCODE') || '';
-}
-
-/**
- * Returns 'ok', 'auth' (wrong), 'locked' or 'not_configured'.
- * Apps Script can't tell callers apart (no IP address), so the lockout is for everyone: after
- * AUTH_MAX_FAILURES wrong guesses in a row, even the right passcode is refused until the lockout ends.
- * That stops guessing, at the cost that someone who knows the URL could keep the pilot locked out by
- * spamming wrong guesses. With a long passcode, guessing is hopeless, so this trade-off favours safety.
- */
-function checkPasscode_(key) {
-  const secret = passcode_();
-  if (!secret) return 'not_configured';
-  const cache = CacheService.getScriptCache();
-  const fails = Number(cache.get('authFails') || 0);
-  if (fails >= CONFIG.AUTH_MAX_FAILURES) return 'locked';
-  if (safeEqual_(String(key == null ? '' : key), secret)) {
-    if (fails) cache.remove('authFails');
-    return 'ok';
-  }
-  cache.put('authFails', String(fails + 1), CONFIG.AUTH_LOCKOUT_SECONDS);
-  console.warn('Wrong passcode (' + (fails + 1) + ' in a row)');
-  return fails + 1 >= CONFIG.AUTH_MAX_FAILURES ? 'locked' : 'auth';
-}
-
-/** Compares two strings in the same time however many characters match (a normal === can leak that). */
-function safeEqual_(a, b) {
-  let diff = a.length ^ b.length;
-  const n = Math.max(a.length, b.length);
-  for (let i = 0; i < n; i++) diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
-  return diff === 0;
-}
-
-/**
- * Run this once from the editor (select "setup", click Run). It
- *  - asks you to approve the permissions (Calendar, Sheets, Mail),
- *  - creates the "Pilot Jobs" calendar and the "Pilot Jobs - data" spreadsheet,
- *  - and reports whether the passcode is set. Read the result under "Execution log".
- */
-function setup() {
-  const ss = ss_();
-  const cal = calendar_();
-  MailApp.getRemainingDailyQuota(); // makes sure the email permission is requested too
-  Logger.log('Spreadsheet: ' + ss.getUrl());
-  Logger.log('Calendar: ' + cal.getName());
-  const pc = passcode_();
-  if (!pc) Logger.log('PASSCODE NOT SET. Add a Script property named API_PASSCODE (Project Settings > Script properties).');
-  else if (pc.length < 12) Logger.log('Passcode is set but short (' + pc.length + ' characters). Use at least 12, ideally 16 or more.');
-  else Logger.log('Passcode is set (' + pc.length + ' characters).');
-}
-
-// ---------------------------------------------------------------------------
-// Functions the API can run (listed in API_FUNCTIONS_ above)
-// ---------------------------------------------------------------------------
-
-function getAll() {
-  return {
-    active: readSheet_(jobsSheet_()),
-    archive: readSheet_(archiveSheet_()),
-    appUrl: appUrl_(),
-    calendarName: calendar_().getName(),
-    reminderMinutes: CONFIG.FLIGHT_REMINDER_MINUTES,
-    colours: {
-      tentative: colourWord_(CONFIG.COLOURS.tentative),
-      confirmed: colourWord_(CONFIG.COLOURS.confirmed)
-    }
-  };
-}
-
-/** Quick-add a job. input.status = 'confirmed' creates it confirmed (checklist ready); anything else = tentative. */
-function createJob(input) {
-  return withLock_(function () {
-    const job = normalise_(input, null);
-    if (input && input.status === 'confirmed') { job.status = 'confirmed'; seedChecklist_(job); }
-    job.syncError = sync_(job);
-    upsert_(jobsSheet_(), job, job.updated);
-    if (CONFIG.EMAIL_NEW_JOB) emailNewJob_(job);
-    return job;
-  });
-}
-
-/** Save edits to an active job (details + checklist). */
-function saveJob(input) {
-  return withLock_(function () {
-    const sh = jobsSheet_();
-    const stored = input && input.id ? readRow_(sh, String(input.id)) : null;
-    if (!stored) throw new Error('This job is no longer active (it may have been archived).');
-    const job = normalise_(input, stored);
-
-    // flights removed in the page: drop their calendar events
-    const keep = {};
-    job.flights.forEach(function (f) { keep[f.id] = true; });
-    stored.flights.forEach(function (f) {
-      if (!keep[f.id] && f.eventId) deleteEvent_(f.eventId);
+    // WHY text/plain: browsers send a "preflight" permission check before JSON requests to another site, and
+    // Apps Script can't answer one. A text/plain POST counts as a "simple request", so no preflight happens.
+    // The body is still JSON text, which the server parses itself.
+    // WHY no cookies: a request to another site carries none of that site's cookies unless asked to. That's the
+    // whole point. Google never sees which accounts are signed in on this device, so the multiple-accounts
+    // problem can't happen. (The passcode in the body is what proves who is asking.)
+    // WHY the passcode is in the body, not the address: addresses end up in logs and browser history.
+    const res = await fetch(cfg.url, {
+      method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ fn: fn, args: args, key: cfg.key }), redirect: 'follow', signal: ctl.signal
     });
-    const keepLeg = {};
-    job.legs.forEach(function (l) { keepLeg[l.id] = true; });
-    stored.legs.forEach(function (l) {
-      if (keepLeg[l.id]) return;
-      legEventIds_(l).forEach(deleteEvent_);
-    });
-
-    job.syncError = sync_(job);
-    upsert_(sh, job, job.updated);
-    return job;
-  });
-}
-
-/** action: 'confirm' | 'cancel' | 'complete' | 'restore' */
-function setStatus(id, action) {
-  return withLock_(function () {
-    id = String(id || '');
-    const jobsSh = jobsSheet_();
-    const archSh = archiveSheet_();
-    const now = new Date().toISOString();
-
-    if (action === 'restore') {
-      const a = readRow_(archSh, id);
-      if (!a) throw new Error('Job not found in the archive.');
-      a.status = a.status === 'cancelled' ? (a.prevStatus || 'tentative') : 'confirmed';
-      a.prevStatus = '';
-      a.updated = now;
-      a.syncError = sync_(a);
-      upsert_(jobsSh, a, a.updated);
-      removeRow_(archSh, id);
-      return a;
-    }
-
-    const job = readRow_(jobsSh, id);
-    if (!job) throw new Error('Job not found (it may already be archived).');
-
-    if (action === 'confirm') {
-      if (job.status !== 'tentative') throw new Error('Only tentative jobs can be confirmed.');
-      job.status = 'confirmed';
-      seedChecklist_(job);
-      job.updated = now;
-      job.syncError = sync_(job);
-      upsert_(jobsSh, job, job.updated);
-      return job;
-    }
-
-    if (action === 'cancel') {
-      job.prevStatus = job.status;
-      job.status = 'cancelled';
-      job.updated = now;
-      deleteAllEvents_(job);
-      job.eventId = '';
-      job.calSig = '';
-      job.flights.forEach(function (f) { f.eventId = ''; f.sig = ''; });
-      job.legs.forEach(function (l) {
-        WINDOW_KINDS_.forEach(function (k) { l[k.due] = ''; l[k.open] = ''; l[k.sig] = ''; });
-      });
-      upsert_(archSh, job, now);
-      removeRow_(jobsSh, id);
-      return job;
-    }
-
-    if (action === 'complete') {
-      if (job.status !== 'confirmed') throw new Error('Only confirmed jobs can be completed.');
-      job.status = 'completed';
-      job.updated = now;
-      job.syncError = sync_(job);
-      upsert_(archSh, job, now);
-      removeRow_(jobsSh, id);
-      return job;
-    }
-
-    throw new Error('Unknown action: ' + action);
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Job model
-// ---------------------------------------------------------------------------
-
-function normalise_(inp, stored) {
-  inp = inp || {};
-  const prev = {};
-  ((stored && stored.flights) || []).forEach(function (f) { prev[f.id] = f; });
-  const prevLegs = {};
-  ((stored && stored.legs) || []).forEach(function (l) { prevLegs[l.id] = l; });
-  const now = new Date().toISOString();
-  const arr = function (v, n) { return Array.isArray(v) ? v.slice(0, n) : []; };
-
-  const j = {
-    id: stored ? stored.id : newId_('j'),
-    status: stored ? stored.status : 'tentative',
-    prevStatus: stored ? (stored.prevStatus || '') : '',
-    title: oneLine_(inp.title, 120),
-    notes: str_(inp.notes, 4000),
-    location: oneLine_(inp.location, 200),
-    startDate: date_(inp.startDate),
-    startTime: time_(inp.startTime),
-    endDate: date_(inp.endDate),
-    endTime: time_(inp.endTime),
-    flights: arr(inp.flights, 30).map(function (f) {
-      const id = itemId_(f.id);
-      const p = prev[id] || {};
-      return {
-        id: id,
-        dir: f.dir === 'return' ? 'return' : 'out',
-        route: oneLine_(f.route, 100),
-        flightNo: oneLine_(f.flightNo, 20),
-        depart: dt_(f.depart),
-        arrive: dt_(f.arrive),
-        ref: oneLine_(f.ref, 100),
-        booked: bool_(f.booked),
-        checkedIn: bool_(f.checkedIn),            // checked in for a commercial flight: switches its check-in reminders off
-        driveTime: time_(f.driveTime),            // driving only: how long the drive takes (hh:mm); blocks that time out on the calendar
-        mode: travelMode_(f),                     // flight | train | car | other (car = driving yourself: nothing to book)
-        commercial: travelMode_(f) === 'flight',  // kept for older data: true only for flights (these get check-in reminders)
-        eventId: p.eventId || '',
-        sig: p.sig || ''
-      };
-    }),
-    stays: arr(inp.stays, 30).map(function (s) {
-      return {
-        id: itemId_(s.id),
-        location: oneLine_(s.location, 120),
-        checkIn: date_(s.checkIn),
-        checkOut: date_(s.checkOut),
-        ref: oneLine_(s.ref, 100),
-        booked: bool_(s.booked)
-      };
-    }),
-    legs: arr(inp.legs, 30).map(function (l) {
-      const id = itemId_(l.id);
-      const p = prevLegs[id] || {};
-      const ends = legEnds_(l), from = ends.from, to = ends.to;
-      return {
-        id: id,
-        from: from, to: to,                  // ICAO codes; "route" below is kept as the joined text for titles and old data
-        route: from && to ? from + ' > ' + to : (from || to || oneLine_(l.route, 100)),
-        date: date_(l.date),
-        time: time_(l.time),                 // departure time, UTC
-        destManual: bool_(l.destManual),     // true when the pilot overrode the country inferred from the destination airport
-        dest: legDest_(l, to),               // destination country, drives the GAR rule
-        fpEarliest: num_(l.fpEarliest),      // earliest filing: hours before departure ('' = no limit)
-        fpLatest: num_(l.fpLatest),          // latest filing: hours before departure ('' = departure)
-        fpNoRule: bool_(l.fpNoRule),
-        gar: bool_(l.gar),
-        plan: bool_(l.plan),
-        handling: bool_(l.handling),
-        wx: bool_(l.wx),
-        fpDueEventId: p.fpDueEventId || '',
-        fpOpenEventId: p.fpOpenEventId || '',
-        fpSig: p.fpSig || '',
-        garDueEventId: p.garDueEventId || '',
-        garOpenEventId: p.garOpenEventId || '',
-        garSig: p.garSig || ''
-      };
-    }),
-    tasks: arr(inp.tasks, 50).map(function (t) {
-      return { id: itemId_(t.id), label: oneLine_(t.label, 120) || 'Task', done: bool_(t.done) };
-    }),
-    created: stored ? stored.created : now,
-    updated: now,
-    eventId: stored ? (stored.eventId || '') : '',
-    calSig: stored ? (stored.calSig || '') : ''
-  };
-  if (!j.title) j.title = autoTitle_(j);
-  return j;
-}
-
-function seedChecklist_(job) {
-  if (job.flights.length || job.stays.length || job.legs.length || job.tasks.length) return;
-  job.flights = [
-    { id: newId_('i'), dir: 'out', route: '', flightNo: '', depart: '', arrive: '', ref: '', booked: false, checkedIn: false, driveTime: '', mode: 'flight', commercial: true, eventId: '', sig: '' },
-    { id: newId_('i'), dir: 'return', route: '', flightNo: '', depart: '', arrive: '', ref: '', booked: false, checkedIn: false, driveTime: '', mode: 'flight', commercial: true, eventId: '', sig: '' }
-  ];
-  job.stays = [{ id: newId_('i'), location: '', checkIn: job.startDate, checkOut: job.endDate, ref: '', booked: false }];
-  job.legs = [{ id: newId_('i'), route: '', from: '', to: '', destManual: false, date: job.startDate, time: '', dest: 'UK', fpEarliest: '', fpLatest: '', fpNoRule: false,
-    gar: false, plan: false, handling: false, wx: false, fpDueEventId: '', fpOpenEventId: '', fpSig: '',
-    garDueEventId: '', garOpenEventId: '', garSig: '' }];
-  job.tasks = [
-    { id: newId_('i'), label: 'Send invoice', done: false },
-    { id: newId_('i'), label: 'Log expenses and receipts', done: false }
-  ];
-}
-
-function autoTitle_(j) {
-  const first = String(j.notes || '').split(/\r?\n/)[0].trim();
-  return (first || j.location || 'New job').slice(0, 60);
-}
-
-// ---------------------------------------------------------------------------
-// Calendar
-// ---------------------------------------------------------------------------
-
-function calendar_() {
-  if (_mem_.cal) return _mem_.cal;
-  let cal;
-  if (!CONFIG.CALENDAR_NAME) {
-    cal = CalendarApp.getDefaultCalendar();
-  } else {
-    const props = PropertiesService.getScriptProperties();
-    const id = props.getProperty('CALENDAR_ID');
-    if (id) cal = CalendarApp.getCalendarById(id);
-    if (!cal) {
-      const found = CalendarApp.getCalendarsByName(CONFIG.CALENDAR_NAME).filter(function (c) { return c.isOwnedByMe(); });
-      cal = found.length ? found[0] : CalendarApp.createCalendar(CONFIG.CALENDAR_NAME);
-      props.setProperty('CALENDAR_ID', cal.getId());
-    }
+    data = await res.json();
+  } catch (e) {
+    const err = new Error(e && e.name === 'SyntaxError'
+      ? 'The server’s reply wasn’t what I expected. Check the server address ends in /exec and that the deployment’s access is set to Anyone.'
+      : 'Couldn’t reach the server. Check your connection and the server address.');
+    err.code = 'network'; throw err;
+  } finally { clearTimeout(timer); }
+  if (!data || data.ok !== true) {
+    const code = data && data.error;
+    const err = new Error(API_MSG[code] || (data && data.message) || 'The server reported a problem.');
+    err.code = code || 'server'; throw err;
   }
-  _mem_.cal = cal;
-  return cal;
+  return data.result;
 }
 
-/** Brings the job's calendar events in line with the job. Returns '' or an error message. */
-function sync_(job) {
-  try {
-    syncJobEvent_(job);
-    syncFlightEvents_(job);
-    syncLegEvents_(job);
-    return '';
-  } catch (err) {
-    return 'Calendar sync failed: ' + (err && err.message ? err.message : err);
-  }
+function fmtDate(s) {
+  if (!s) return '';
+  const d = new Date(s + 'T00:00:00Z');
+  if (isNaN(d)) return s;
+  const o = { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' };
+  if (d.getUTCFullYear() !== THIS_YEAR) o.year = 'numeric';
+  return d.toLocaleDateString('en-GB', o);
 }
-
-function jobSig_(job) {
-  return JSON.stringify([job.status, job.title, job.notes, job.location,
-    job.startDate, job.startTime, job.endDate, job.endTime]);
+function fmtDT(s) { if (!s) return ''; const p = s.split('T'); return fmtDate(p[0]) + ' ' + (p[1] || ''); }
+function dateRange(j) {
+  if (!j.startDate) return '';
+  let s = fmtDate(j.startDate) + (j.startTime ? ' ' + j.startTime : '');
+  if (j.endDate && j.endDate !== j.startDate) s += ' \u2192 ' + fmtDate(j.endDate) + (j.endTime ? ' ' + j.endTime : '');
+  else if (j.endTime) s += ' \u2013 ' + j.endTime;
+  return s;
 }
-
-function syncJobEvent_(job) {
-  const cal = calendar_();
-  let ev = job.eventId ? getEvent_(cal, job.eventId) : null;
-
-  if (!job.startDate) {                       // nothing to put on a calendar yet
-    if (ev) ev.deleteEvent();
-    job.eventId = '';
-    job.calSig = '';
-    return;
-  }
-
-  const sig = jobSig_(job);
-  if (ev && job.calSig === sig) return;       // unchanged
-
-  const title = eventTitle_(job);
-  const desc = eventDescription_(job);
-  const endDate = (job.endDate && job.endDate >= job.startDate) ? job.endDate : job.startDate;
-  const timed = !!(job.startTime && job.endTime);
-  let start, end;
-  if (timed) {
-    start = parseDT_(job.startDate, job.startTime);
-    end = parseDT_(endDate, job.endTime);
-    if (end <= start) end = new Date(start.getTime() + 3600000);
-  } else {
-    start = parseYMD_(job.startDate);
-    end = addDays_(parseYMD_(endDate), 1);    // all-day end dates are exclusive
-  }
-
-  if (!ev) {
-    const opts = { description: desc, location: job.location };
-    ev = timed ? cal.createEvent(title, start, end, opts) : cal.createAllDayEvent(title, start, end, opts);
-  } else {
-    ev.setTitle(title);
-    ev.setDescription(desc);
-    ev.setLocation(job.location);
-    if (timed) ev.setTime(start, end); else ev.setAllDayDates(start, end);
-  }
-  ev.setColor(CalendarApp.EventColor[CONFIG.COLOURS[job.status] || CONFIG.COLOURS.tentative]);
-  job.eventId = ev.getId();
-  job.calSig = sig;
+function nightsBetween(a, b) {
+  if (!a || !b) return 0;
+  const n = Math.round((new Date(b + 'T00:00:00Z') - new Date(a + 'T00:00:00Z')) / 864e5);
+  return n > 0 ? n : 0;
 }
-
-function syncFlightEvents_(job) {
-  const cal = calendar_();
-  const live = job.status === 'confirmed' || job.status === 'completed';
-  job.flights.forEach(function (f) {
-    const ev = f.eventId ? getEvent_(cal, f.eventId) : null;
-    const want = live && f.depart;
-    if (!want) {
-      if (ev) ev.deleteEvent();
-      f.eventId = '';
-      f.sig = '';
-      return;
-    }
-    const sig = JSON.stringify([job.title, f.dir, f.route, f.flightNo, f.depart, f.arrive, f.ref, f.booked, f.checkedIn, f.mode, f.driveTime]);
-    if (ev && f.sig === sig) return;
-
-    const dp = f.depart.split('T');
-    const start = parseDT_(dp[0], dp[1]);
-    let end = null;
-    if (f.mode === 'car') {                                   // driving: block out the whole drive
-      const dm = f.driveTime ? +f.driveTime.slice(0, 2) * 60 + +f.driveTime.slice(3) : 0;
-      end = new Date(start.getTime() + (dm || 60) * 60000);
-    } else if (f.arrive) {
-      const ap = f.arrive.split('T');
-      end = parseDT_(ap[0], ap[1]);
-    }
-    if (!end || end <= start) end = new Date(start.getTime() + CONFIG.FLIGHT_DEFAULT_MINUTES * 60000);
-
-    const icon = { flight: '\u2708', train: '\uD83D\uDE86', car: '\uD83D\uDE97', other: '\uD83D\uDE8C' }[f.mode] || '\u2708';
-    const title = icon + ' ' + [f.flightNo, f.route].filter(Boolean).join(' ') +
-      (f.flightNo || f.route ? ' - ' : '') + (f.dir === 'return' ? 'return' : 'outbound') + ' (' + job.title + ')';
-    const desc = [
-      { flight: 'Commercial flight', train: 'Train', car: 'Drive', other: 'Travel' }[f.mode] + ' for job: ' + job.title,
-      f.booked ? 'Booked' + (f.ref ? ' - ref ' + f.ref : '') : 'NOT BOOKED YET',
-      f.mode === 'car' ? 'Drive time blocked out: ' + (f.driveTime ? f.driveTime.replace(':', ' h ') + ' min' : 'not set - 1 h blocked, add the drive time in the app') + '. Reminder ' + CONFIG.DRIVE_REMINDER_MINUTES.join(', ') + ' min before setting off.'
-        : f.mode !== 'flight' ? 'Reminder: ' + CONFIG.TRAVEL_REMINDER_MINUTES.map(function (m) { return (m / 60) + ' h'; }).join(' and ') + ' before departure.'
-        : f.checkedIn ? 'Checked in - check-in reminders switched off.'
-        : 'Check-in reminders: ' + CONFIG.FLIGHT_REMINDER_MINUTES.map(function (m) { return (m / 60) + ' h'; }).join(' and ') + ' before departure.',
-      appUrl_() ? 'Open checklist: ' + appUrl_() + '?job=' + job.id : ''
-    ].filter(Boolean).join('\n');
-
-    let e2 = ev;
-    if (!e2) {
-      e2 = cal.createEvent(title, start, end, { description: desc });
-    } else {
-      e2.setTitle(title);
-      e2.setDescription(desc);
-      e2.setTime(start, end);
-    }
-    e2.setColor(CalendarApp.EventColor[CONFIG.COLOURS.flight]);
-    if (typeof e2.setTransparency === 'function') e2.setTransparency(CalendarApp.EventTransparency.OPAQUE);   // show as busy: the drive really is blocked out
-    if (f.mode === 'car') setReminders_(e2, CONFIG.DRIVE_REMINDER_MINUTES, false);
-    else if (f.mode !== 'flight') setReminders_(e2, CONFIG.TRAVEL_REMINDER_MINUTES, false);   // trains / other travel: a simple heads-up
-    else if (f.checkedIn) e2.removeAllReminders();      // already checked in: no more check-in reminders (the event stays)
-    else setReminders_(e2, CONFIG.FLIGHT_REMINDER_MINUTES, CONFIG.EMAIL_FLIGHT_REMINDERS);
-    f.eventId = e2.getId();
-    f.sig = sig;
-  });
-}
-
-/**
- * Deadline window for a leg and a rule (all times UTC). Needs the leg date + departure time.
- *   rule.earliest = hours before departure that is the earliest allowed ('' = no limit)
- *   rule.latest   = hours before departure that is the latest allowed ('' = the departure itself)
- */
-function legWindow_(l, rule) {
-  if (!rule || !l.date || !l.time) return null;
+// ---- deadline windows for flight plans and GARs (all times UTC) ----
+const DNAME = { fp: 'Flight plan', gar: 'GAR' };
+function legDep(l) {
+  if (!l.date || !l.time) return null;
   const p = l.date.split('-').map(Number), q = l.time.split(':').map(Number);
   const dep = Date.UTC(p[0], p[1] - 1, p[2], q[0], q[1]);
-  const early = (rule.earliest === '' || rule.earliest == null) ? null : Number(rule.earliest);
-  const late = (rule.latest === '' || rule.latest == null) ? 0 : Number(rule.latest);
-  return { dep: dep, opens: early == null ? null : dep - early * 3600000, due: dep - late * 3600000 };
+  return isNaN(dep) ? null : dep;
 }
-
-function utcText_(ms) {
-  return Utilities.formatDate(new Date(ms), 'UTC', 'EEE d MMM HH:mm') + ' UTC';
+function parisWeekend(ms) {
+  const d = new Date(ms).toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'Europe/Paris' });
+  return d === 'Sat' || d === 'Sun';
 }
-
-/**
- * GAR rule from the destination country (the pilot's rules):
- *   UK            - not earlier than 48 h before flight time
- *   France, Mon-Fri - within 24 h of flight time (not earlier)
- *   France, Sat/Sun - at least 48 h before flight time
- *   anything else - no rule
- * Weekday is the day of the departure in Paris time. Returns null until a destination is chosen.
- */
-function garRule_(l) {
-  if (l.dest === 'UK') return { earliest: 48, latest: 0 };
-  if (l.dest === 'OTHER') return { earliest: '', latest: 0 };
+// ICAO airport codes start with a region prefix: EG = United Kingdom, LF = France. Anything else that looks like an ICAO code is "anywhere else".
+function icaoCountry(code) {
+  const c = String(code || '').trim().toUpperCase();
+  if (!/^[A-Z]{4}$/.test(c)) return '';
+  return c.startsWith('EG') ? 'UK' : c.startsWith('LF') ? 'FR' : 'OTHER';
+}
+const joinRoute = l => l.from && l.to ? l.from + ' \u2192 ' + l.to : (l.from || l.to || '');
+// Older legs stored one "route" string: split "EGKB > LFMN" into the two fields when the page loads them.
+function splitLeg(l) {
+  if (!l.from && !l.to && l.route) {
+    const m = /^\s*([A-Za-z]{4})\s*(?:>|\u2192|-|to)\s*([A-Za-z]{4})\s*$/i.exec(l.route);
+    if (m) { l.from = m[1].toUpperCase(); l.to = m[2].toUpperCase(); }
+  }
+  l.from = l.from || ''; l.to = l.to || ''; l.destManual = !!l.destManual;
+  if (l.to && !l.destManual && icaoCountry(l.to)) l.dest = icaoCountry(l.to);
+  return l;
+}
+// GAR rule from the destination country (set by the pilot's rules). null until a destination is chosen.
+function garRule(l) {
+  if (l.dest === 'UK') return { earliest: 48, latest: 0, note: 'UK arrival: GAR no earlier than 48 h before flight time.' };
+  if (l.dest === 'OTHER') return { earliest: '', latest: 0, note: 'No GAR rule for this destination.' };
   if (l.dest === 'FR') {
-    if (!l.date) return { earliest: '', latest: 0 };
-    const p = l.date.split('-').map(Number), q = (l.time || '12:00').split(':').map(Number);
-    const dow = Number(Utilities.formatDate(new Date(Date.UTC(p[0], p[1] - 1, p[2], q[0], q[1])), 'Europe/Paris', 'u')); // 1 = Mon .. 7 = Sun
-    return dow <= 5 ? { earliest: 24, latest: 0 } : { earliest: '', latest: 48 };
+    if (!l.date) return { earliest: '', latest: 0, note: 'France: the rule depends on the weekday – add the departure date.' };
+    const dep = legDep({ date: l.date, time: l.time || '12:00' });
+    return parisWeekend(dep)
+      ? { earliest: '', latest: 48, note: 'France, weekend: GAR at least 48 h before flight time.' }
+      : { earliest: 24, latest: 0, note: 'France, weekday: GAR within 24 h of flight time (not earlier).' };
   }
   return null;
 }
-
-const WINDOW_KINDS_ = [
-  { name: 'FLIGHT PLAN', text: 'Flight plan', box: 'File flight plan', doneKey: 'plan',
-    due: 'fpDueEventId', open: 'fpOpenEventId', sig: 'fpSig',
-    rule: function (l) { return { earliest: l.fpEarliest, latest: l.fpLatest }; },
-    extra: function (l) { return [l.fpEarliest, l.fpLatest]; },
-    minutes: function () { return CONFIG.FLIGHT_PLAN_REMINDER_MINUTES; } },
-  { name: 'GAR', text: 'GAR', box: 'Submit GAR', doneKey: 'gar',
-    due: 'garDueEventId', open: 'garOpenEventId', sig: 'garSig',
-    rule: garRule_,
-    extra: function (l) { return [l.dest]; },
-    minutes: function () { return CONFIG.GAR_REMINDER_MINUTES; } }
-];
-
-function legEventIds_(l) {
-  const ids = [];
-  WINDOW_KINDS_.forEach(function (k) { if (l[k.due]) ids.push(l[k.due]); if (l[k.open]) ids.push(l[k.open]); });
-  return ids;
+function legRule(l, kind) { return kind === 'gar' ? garRule(l) : { earliest: l.fpEarliest, latest: l.fpLatest }; }
+function legWindow(l, kind) {
+  const rule = legRule(l, kind), dep = legDep(l);
+  if (!rule || dep == null) return null;
+  const early = (rule.earliest === '' || rule.earliest == null) ? null : Number(rule.earliest);
+  const late = (rule.latest === '' || rule.latest == null) ? 0 : Number(rule.latest);
+  return { dep: dep, opens: early == null ? null : dep - early * 36e5, due: dep - late * 36e5 };
+}
+function fmtUTC(ms) {
+  return new Date(ms).toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' }) + ' UTC';
+}
+function human(ms) {
+  const a = Math.abs(ms), h = Math.floor(a / 36e5);
+  return h >= 48 ? Math.floor(h / 24) + ' days' : h >= 1 ? h + ' h' : Math.max(1, Math.round(a / 6e4)) + ' min';
+}
+// kind: 'fp' | 'gar'.  level: ok | info | prompt | wait | open | soon | late | past
+function legStatus(l, kind) {
+  const gar = kind === 'gar';
+  if (gar ? l.gar : l.plan) return { level: 'ok', text: gar ? 'GAR submitted ✓' : 'Flight plan filed ✓' };
+  const verb = gar ? 'submit' : 'file';
+  let prompt = '';
+  if (gar) {
+    if (!garRule(l)) return { level: 'prompt', text: 'Choose the destination country above to apply the GAR rule.' };
+  } else {
+    const hasRule = (l.fpEarliest !== '' && l.fpEarliest != null) || (l.fpLatest !== '' && l.fpLatest != null);
+    if (!hasRule && l.fpNoRule !== true) prompt = 'Check the filing rule for this jurisdiction and enter it above (or tick “No specific rule”). ';
+  }
+  const w = legWindow(l, kind);
+  if (!w) return { level: 'info', text: 'Add the departure date and time (UTC) to work out the deadline.' };
+  const now = Date.now();
+  if (now > w.dep) return { level: 'past', text: 'Departure time has passed. Tick the box if it was done.' };
+  if (now > w.due) return { level: 'late', text: prompt + 'Deadline passed ' + human(now - w.due) + ' ago (' + fmtUTC(w.due) + ').' };
+  if (w.opens != null && now < w.opens)
+    return { level: 'wait', text: prompt + 'Too early to ' + verb + ' – window opens in ' + human(w.opens - now) + ' (' + fmtUTC(w.opens) + '). Deadline ' + fmtUTC(w.due) + '.' };
+  const left = w.due - now;
+  if (left <= 864e5) return { level: 'soon', text: prompt + (gar ? 'Submit' : 'File') + ' now – deadline in ' + human(left) + ' (' + fmtUTC(w.due) + ').' };
+  return { level: prompt ? 'prompt' : 'open', text: prompt + 'Window open – deadline in ' + human(left) + ' (' + fmtUTC(w.due) + ').' };
+}
+const fpStatus = l => legStatus(l, 'fp');
+function deadlineAlerts() {
+  const out = [];
+  S.active.filter(j => j.status === 'confirmed').forEach(j => (j.legs || []).forEach(l => ['gar', 'fp'].forEach(kind => {
+    const st = legStatus(l, kind);
+    if (st.level === 'late' || st.level === 'soon') out.push({ job: j, leg: l, kind: kind, s: st, due: legWindow(l, kind).due });
+  })));
+  return out.sort((a, b) => a.due - b.due);
+}
+function alertBanner() {
+  const a = deadlineAlerts();
+  if (!a.length) return '';
+  return '<div class="alert"><b>⚠ Deadlines need attention</b>' + a.map(x =>
+    '<div class="alert-row" data-act="open" data-id="' + x.job.id + '"><span>' + esc(DNAME[x.kind] + ' · ' + (x.leg.route || 'Leg') + ' · ' + jobTitle(x.job)) +
+    '</span><small class="' + x.s.level + '">' + esc(x.s.text) + '</small></div>').join('') + '</div>';
 }
 
-/**
- * For every unfiled/unsubmitted leg: a "deadline" event (with reminders) and, if the rule has an
- * "earliest" limit, a "window opens" event. Ticking the box (or cancelling/completing the job) removes them.
- */
-function syncLegEvents_(job) {
-  const live = job.status === 'confirmed';
-  job.legs.forEach(function (l) {
-    WINDOW_KINDS_.forEach(function (k) { syncWindowEvents_(job, l, k, live); });
+const jobTitle = j => j.title || (j.notes || '').split('\n')[0].slice(0, 50) || j.location || 'Untitled job';
+const sortKey = j => (j.startDate || '0000-00-00') + (j.startTime || '');
+const cmp = (a, b) => sortKey(a) < sortKey(b) ? -1 : sortKey(a) > sortKey(b) ? 1 : 0;
+
+// ---------- state ----------
+const S = { active: [], archive: [], appUrl: '', calendarName: 'Pilot Jobs', reminders: [1440, 240, 120],
+            colours: { tentative: 'orange', confirmed: 'green' },
+            tab: 'active', todoSort: 'date', openId: null, draft: null, needConnect: false, connectError: '', cxUrl: null, loaded: false, error: '', opened: false, imp: null };
+const UI = { open: new Set() };
+const saving = {};
+let chip = '';
+
+const findJob = id => id === 'draft' ? S.draft : (S.active.find(j => j.id === id) || S.archive.find(j => j.id === id));
+const isArchived = j => S.archive.indexOf(j) >= 0;
+
+// ---------- checklist model ----------
+const legName = l => l.route ? ' (' + l.route + ')' : '';
+// How the pilot gets to / from the job. "car" = driving himself: nothing to book, no calendar event.
+const MODES = [['flight', 'Flight'], ['train', 'Train'], ['car', 'Driving'], ['other', 'Other (bus, ferry\u2026)']];
+const travelMode = f => f.mode || (f.commercial === false ? 'other' : 'flight');
+const fixTravel = f => { f.mode = travelMode(f); f.commercial = f.mode === 'flight'; return f; };
+const CATS = [['gar', 'Submit GARs'], ['plan', 'File flight plans'], ['handling', 'Handling, fuel & permits'], ['wx', 'Weather & NOTAM briefings'],
+  ['out', 'Book outbound travel'], ['ret', 'Book return travel'], ['checkin', 'Check in for flights'],
+  ['stay', 'Book accommodation'], ['after', 'Post-flight tasks']];
+function allChecks(j) {
+  const out = [];
+  j.flights.forEach(fixTravel);
+  const start = j.startDate || '', end = j.endDate || j.startDate || '';
+  const day = s => (s || '').slice(0, 10);
+  j.legs.forEach(l => {
+    const d = l.date || start;
+    const gw = legWindow(l, 'gar');
+    out.push({ cat: 'gar', label: 'Submit GAR' + legName(l), detail: l.route, done: l.gar, list: 'legs', id: l.id, field: 'gar',
+      date: gw ? new Date(gw.due).toISOString().slice(0, 10) : d, leg: l });
+    const w = legWindow(l, 'fp');
+    out.push({ cat: 'plan', label: 'File flight plan' + legName(l), detail: l.route, done: l.plan, list: 'legs', id: l.id, field: 'plan',
+      date: w ? new Date(w.due).toISOString().slice(0, 10) : d, leg: l });
+    out.push({ cat: 'handling', label: 'Arrange handling, fuel & permits' + legName(l), detail: l.route, done: l.handling, list: 'legs', id: l.id, field: 'handling', date: d });
+    out.push({ cat: 'wx', label: 'Weather & NOTAM briefing' + legName(l), detail: l.route, done: l.wx, list: 'legs', id: l.id, field: 'wx', date: d });
+  });
+  const noun = f => ({ flight: 'flight', train: 'train' }[f.mode] || 'travel');
+  j.flights.filter(f => f.dir === 'out' && f.mode !== 'car').forEach(f =>
+    out.push({ cat: 'out', label: 'Book outbound ' + noun(f) + (f.route ? ' (' + f.route + ')' : ''), detail: f.route, done: f.booked,
+      list: 'flights', id: f.id, field: 'booked', date: day(f.depart) || start }));
+  j.flights.filter(f => f.dir === 'return' && f.mode !== 'car').forEach(f =>
+    out.push({ cat: 'ret', label: 'Book return ' + noun(f) + (f.route ? ' (' + f.route + ')' : ''), detail: f.route, done: f.booked,
+      list: 'flights', id: f.id, field: 'booked', date: day(f.depart) || end }));
+  ['out', 'return'].forEach(dir => j.flights.filter(f => f.dir === dir && f.commercial).forEach(f =>
+    out.push({ cat: 'checkin', label: 'Check in for ' + (dir === 'out' ? 'outbound' : 'return') + ' flight' + (f.route ? ' (' + f.route + ')' : ''),
+      detail: f.route, done: f.checkedIn, list: 'flights', id: f.id, field: 'checkedIn', date: day(f.depart) || (dir === 'out' ? start : end), when: f.depart })));
+  j.stays.forEach(s =>
+    out.push({ cat: 'stay', label: 'Book accommodation' + (s.location ? ' \u2013 ' + s.location : ''), detail: s.location, done: s.booked,
+      list: 'stays', id: s.id, field: 'booked', date: s.checkIn || start }));
+  j.tasks.forEach(t => out.push({ cat: 'after', label: t.label, detail: t.label, done: t.done, list: 'tasks', id: t.id, field: 'done', date: end }));
+  return out;
+}
+function todoItems() {
+  const out = [];
+  S.active.filter(j => j.status === 'confirmed').forEach(j =>
+    allChecks(j).forEach(c => { if (!c.done) out.push(Object.assign({ job: j }, c)); }));
+  const key = t => (t.date || '9999-99-99');
+  const order = t => CATS.findIndex(c => c[0] === t.cat);
+  return out.sort((a, b) => key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : order(a) - order(b));
+}
+function todoRow(t, byTask) {
+  const main = byTask ? (t.detail || 'Details to be added') : t.label;
+  let sub = esc(jobTitle(t.job)) + (byTask && t.date ? ' \u00b7 ' + fmtDate(t.date) : '');
+  if (t.cat === 'checkin') sub += '<br><span class="fpstat">' + (t.when ? 'Departs ' + esc(fmtDT(t.when)) : 'Add the departure time to get reminders') + '</span>';
+  if ((t.cat === 'plan' || t.cat === 'gar') && t.leg) { const s = legStatus(t.leg, t.cat === 'gar' ? 'gar' : 'fp'); sub += '<br><span class="fpstat ' + s.level + '">' + esc(s.text) + '</span>'; }
+  return '<div class="todo"><input type="checkbox" aria-label="Mark done" data-todo="' + t.job.id + '|' + t.list + '|' + t.id + '|' + t.field + '">' +
+    '<div class="todo-t" data-act="open" data-id="' + t.job.id + '"><b>' + esc(main) + '</b><span class="sum">' + sub + '</span></div></div>';
+}
+function todoHTML() {
+  const items = todoItems();
+  const seg = '<div class="tabs sub"><div class="tab ' + (S.todoSort === 'date' ? 'on' : '') + '" data-act="sort" data-sort="date">By date</div>' +
+    '<div class="tab ' + (S.todoSort === 'task' ? 'on' : '') + '" data-act="sort" data-sort="task">By task</div></div>';
+  if (!items.length) return seg + '<div class="empty">Nothing outstanding \u2713<br><span class="small">Confirmed jobs\u2019 open checklist items appear here.</span></div>';
+  let body = seg;
+  if (S.todoSort === 'task') {
+    CATS.forEach(c => {
+      const g = items.filter(t => t.cat === c[0]);
+      if (g.length) body += '<h2 class="sec">' + c[1] + ' <small>' + g.length + '</small></h2>' + g.map(t => todoRow(t, true)).join('');
+    });
+  } else {
+    let last = null;
+    items.forEach(t => {
+      if (t.date !== last) { last = t.date; body += '<h2 class="sec">' + (t.date ? fmtDate(t.date) : 'No date yet') + '</h2>'; }
+      body += todoRow(t, false);
+    });
+  }
+  return body;
+}
+function progress(j) {
+  const c = allChecks(j);
+  const done = c.filter(x => x.done).length;
+  const next = c.find(x => !x.done);
+  return { done, total: c.length, next: next ? next.label : '', pct: c.length ? Math.round(100 * done / c.length) : 0 };
+}
+function isDone(list, it) {
+  if (list === 'flights' && travelMode(it) === 'car') return true;          // driving yourself: nothing to do
+  if (list === 'legs') return it.gar && it.plan && it.handling && it.wx;
+  return !!(it.booked || it.done);
+}
+function minutesText() {
+  const t = S.reminders.map(m => (m / 60) + ' h');
+  return t.length > 1 ? t.slice(0, -1).join(', ') + ' and ' + t[t.length - 1] : t.join('');
+}
+function flightHint(f) {
+  const fm = travelMode(f);
+  if (fm === 'car') return 'Driving yourself: nothing to book, no calendar event.';
+  if (fm !== 'flight') return f.depart ? '\u23F0 A calendar event with a reminder is added for the departure.' : 'Add a departure time to put it on the calendar.';
+  if (f.checkedIn) return 'Checked in \u2013 check-in reminders are switched off.';
+  return f.depart ? '\u23F0 Calendar reminders set ' + minutesText() + ' before departure.'
+                  : 'Add a departure time to get check-in reminders ' + minutesText() + ' before.';
+}
+function itemSummary(list, it) {
+  if (list === 'flights') {
+    const base = [it.flightNo, it.route, it.depart ? fmtDT(it.depart) : ''].filter(Boolean).join(' \u00B7 ') || 'Tap to add details';
+    return base + ' \u00B7 ' + (it.booked ? 'Booked \u2713' : 'To book') +
+      (travelMode(it) === 'car' ? ' \u00B7 Driving' : '') + (it.commercial && it.booked ? ' \u00B7 ' + (it.checkedIn ? 'Checked in \u2713' : 'Not checked in') : '');
+  }
+  if (list === 'stays') {
+    const n = nightsBetween(it.checkIn, it.checkOut);
+    const dates = it.checkIn ? fmtDate(it.checkIn) + (it.checkOut ? ' \u2192 ' + fmtDate(it.checkOut) : '') : '';
+    return [it.location || 'Location TBC', dates, n ? n + (n === 1 ? ' night' : ' nights') : ''].filter(Boolean).join(' \u00B7 ') +
+      ' \u00B7 ' + (it.booked ? 'Booked \u2713' : 'To book');
+  }
+  if (list === 'legs') {
+    const k = ['gar', 'plan', 'handling', 'wx'].filter(x => it[x]).length;
+    const hot = kind => { const lv = legStatus(it, kind).level; return lv === 'late' || lv === 'soon'; };
+    return [it.route || 'Route TBC', it.date ? fmtDate(it.date) + (it.time ? ' ' + it.time + 'Z' : '') : '', k + '/4 done',
+      hot('gar') ? '\u26A0 GAR due' : '', hot('fp') ? '\u26A0 flight plan due' : ''].filter(Boolean).join(' \u00B7 ');
+  }
+  return '';
+}
+function calState(j) {
+  if (j.syncError) return '<span class="warn">\u26A0 ' + esc(j.syncError) + '</span>';
+  if (j.startDate && j.endDate && j.endDate < j.startDate) return '<span class="warn">\u26A0 The end date is before the start date.</span>';
+  if (!j.startDate) return 'Not on the calendar yet \u2013 add a start date.';
+  if (j.eventId) return '\uD83D\uDCC5 On your \u201C' + esc(S.calendarName) + '\u201D calendar (' +
+    esc(S.colours[j.status] || S.colours.confirmed) + ').';
+  return 'Saving to calendar\u2026';
+}
+
+// ---------- toast / chip / confirm ----------
+let toastTimer;
+function toast(msg, kind) {
+  const t = $('#toast');
+  t.textContent = msg; t.className = 'on' + (kind === 'err' ? ' err' : '');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = ''; }, kind === 'err' ? 6000 : 3500);
+}
+function setChip(k) {
+  chip = k;
+  const el = $('#chip');
+  if (el) paintChip(el);
+}
+function paintChip(el) {
+  el.className = 'chip ' + chip;
+  el.textContent = { pending: 'Unsaved\u2026', saving: 'Saving\u2026', saved: 'Saved \u2713', error: 'Not saved \u26A0' }[chip] || '';
+}
+function askConfirm(title, text, ok, danger) {
+  return new Promise(res => {
+    const d = $('#confirmDlg');
+    $('#cfTitle').textContent = title;
+    $('#cfText').textContent = text;
+    const b = $('#cfOk');
+    b.textContent = ok; b.className = 'btn ' + (danger ? 'danger' : 'good');
+    d.returnValue = '';
+    const done = () => { d.removeEventListener('close', done); res(d.returnValue === 'ok'); };
+    d.addEventListener('close', done);
+    d.showModal();
   });
 }
+async function busy(fn) {
+  document.body.classList.add('busy');
+  try { return await fn(); } finally { document.body.classList.remove('busy'); }
+}
 
-function syncWindowEvents_(job, l, k, live) {
-  const cal = calendar_();
-  const now = Date.now();
-  const w = live && !l[k.doneKey] ? legWindow_(l, k.rule(l)) : null;
-  const dueEv = l[k.due] ? getEvent_(cal, l[k.due]) : null;
-  const openEv = l[k.open] ? getEvent_(cal, l[k.open]) : null;
+// ---------- saving ----------
+function scheduleSave(id, delay) {
+  if (id === 'draft') return;            // a new job isn't saved until the person taps Save
+  const s = saving[id] || (saving[id] = { timer: null, inflight: false, dirty: false });
+  clearTimeout(s.timer);
+  setChip('pending');
+  s.timer = setTimeout(() => { s.timer = null; doSave(id); }, delay);
+}
+async function doSave(id) {
+  const s = saving[id];
+  if (s.inflight) { s.dirty = true; return; }
+  const j = findJob(id);
+  if (!j || isArchived(j)) return;
+  s.inflight = true; s.dirty = false;
+  setChip('saving');
+  try {
+    const res = await api('saveJob', j);
+    mergeServer(j, res);
+    if (!s.dirty) setChip('saved');
+  } catch (e) {
+    setChip('error'); toast(e.message, 'err');
+  } finally {
+    s.inflight = false;
+    if (s.dirty && !s.timer) doSave(id);
+  }
+}
+async function flush(id) {
+  const s = saving[id];
+  if (!s) return;
+  if (s.timer) { clearTimeout(s.timer); s.timer = null; await doSave(id); }
+  while (s.inflight) await sleep(80);
+}
+function mergeServer(j, res) {
+  j.eventId = res.eventId; j.calSig = res.calSig; j.updated = res.updated; j.syncError = res.syncError || '';
+  j.flights.forEach(f => {
+    const r = (res.flights || []).find(x => x.id === f.id);
+    if (r) { f.eventId = r.eventId; f.sig = r.sig; }
+  });
+  const cs = $('#calstate'); if (cs && S.openId === j.id) cs.innerHTML = calState(j);
+}
 
-  if (!w) {
-    if (dueEv) dueEv.deleteEvent();
-    if (openEv) openEv.deleteEvent();
-    l[k.due] = ''; l[k.open] = ''; l[k.sig] = '';
+// ---------- rendering: list ----------
+function card(j) {
+  const arch = isArchived(j);
+  const meta = [dateRange(j) || '<span class="warn">No date yet</span>', j.location ? esc(j.location) : ''].filter(Boolean).join(' \u00B7 ');
+  let sub = '';
+  if (arch) {
+    sub = '<div class="small">' + (j.status === 'cancelled' ? 'Cancelled' : 'Completed') + ' ' + fmtDate((j.updated || '').slice(0, 10)) + '</div>';
+  } else if (j.status === 'confirmed') {
+    const p = progress(j);
+    sub = '<div class="track"><i style="width:' + p.pct + '%"></i></div><div class="small">' + p.done + '/' + p.total + ' done' +
+      (p.next ? ' \u00B7 <b>Next:</b> ' + esc(p.next) : p.total ? ' \u00B7 All done \u2713' : '') + '</div>';
+  } else if (j.notes) {
+    sub = '<div class="snippet">' + esc(j.notes) + '</div>';
+  }
+  return '<article class="card ' + j.status + '" data-act="open" data-id="' + j.id + '" tabindex="0">' +
+    '<div class="cardhead"><p class="t">' + esc(jobTitle(j)) + '</p><span class="badge ' + j.status + '">' + j.status + '</span></div>' +
+    '<div class="meta">' + meta + '</div>' + sub + '</article>';
+}
+
+function renderList(app) {
+  const tent = S.active.filter(j => j.status === 'tentative').sort(cmp);
+  const conf = S.active.filter(j => j.status === 'confirmed').sort(cmp);
+  const arch = S.archive.slice().sort((a, b) => (b.updated || '').localeCompare(a.updated || ''));
+  let body = '';
+  if (S.tab === 'active') {
+    if (!tent.length && !conf.length) body = '<div class="empty">No active jobs.<br>Tap <b>+ New job</b> to add one.</div>';
+    if (conf.length) body += '<h2 class="sec"><span class="dot confirmed"></span>Confirmed <small>' + conf.length + '</small></h2>' + conf.map(card).join('');
+    if (tent.length) body += '<h2 class="sec"><span class="dot tentative"></span>Tentative <small>' + tent.length + '</small></h2>' + tent.map(card).join('');
+  } else if (S.tab === 'todo') {
+    body = todoHTML();
+  } else {
+    body = arch.length ? arch.map(card).join('') : '<div class="empty">Nothing archived yet.<br>Cancelled and completed jobs are kept here.</div>';
+  }
+  const todoCount = todoItems().length;
+  app.innerHTML =
+    '<header class="bar"><h1>Pilot Jobs</h1><div class="bar-actions">' +
+    '<button class="icon" data-act="refresh" aria-label="Refresh">\u21BB</button>' +
+    '<button class="btn primary" data-act="new">+ New job</button></div></header>' +
+    '<nav class="tabs"><div class="tab ' + (S.tab === 'active' ? 'on' : '') + '" data-act="tab" data-tab="active">Active (' + (tent.length + conf.length) + ')</div>' +
+    '<div class="tab ' + (S.tab === 'todo' ? 'on' : '') + '" data-act="tab" data-tab="todo">To do (' + todoCount + ')</div>' +
+    '<div class="tab ' + (S.tab === 'archive' ? 'on' : '') + '" data-act="tab" data-tab="archive">Archive (' + arch.length + ')</div></nav>' +
+    '<main>' + (S.tab === 'archive' ? '' : alertBanner()) + body +
+    (S.tab === 'active' ? '<p class="foot"><button class="linkbtn" data-act="import-open">Import jobs from a spreadsheet</button></p>' : '') + '</main>' +
+    (window.PILOT_MOCK ? '' : '<p class="foot"><button class="linkbtn" data-act="disconnect">Disconnect this device</button></p>');
+}
+
+// ---------- rendering: detail ----------
+const fld = (label, attrs, val, type) =>
+  '<label class="fld"><span>' + label + '</span><input type="' + (type || 'text') + '" autocomplete="off" ' + attrs + ' value="' + esc(val) + '"></label>';
+
+function flightHTML(f) {
+  fixTravel(f);
+  const open = UI.open.has(f.id), car = f.mode === 'car';
+  const what = { flight: 'flight', train: 'train', car: '\u2013 driving', other: 'travel' }[f.mode] || 'flight';
+  const numLabel = { flight: 'Flight no.', train: 'Train / service', other: 'Service / number' }[f.mode];
+  const modeSel = '<label class="inline">Travel by <select data-f="mode" aria-label="Travel by">' + MODES.map(m => '<option value="' + m[0] + '"' + (f.mode === m[0] ? ' selected' : '') + '>' + m[1] + '</option>').join('') + '</select></label>';
+  return '<div class="item ' + (isDone('flights', f) ? 'done' : '') + '" data-list="flights" data-id="' + f.id + '">' +
+    '<div class="item-h">' + (car ? '<span class="modeicon" aria-hidden="true">\uD83D\uDE97</span>' : '<input type="checkbox" data-f="booked" aria-label="Booked" ' + (f.booked ? 'checked' : '') + '>') +
+    '<button class="item-t" data-act="toggle" data-id="' + f.id + '"><b>' + (f.dir === 'out' ? 'Outbound' : 'Return') + ' ' + what + '</b>' +
+    '<span class="sum" data-sum>' + esc(itemSummary('flights', f)) + '</span></button>' +
+    '<button class="icon sm" data-act="del" aria-label="Remove">\u2715</button></div>' +
+    '<div class="item-sub">' + modeSel + ' <span data-checkin' + (f.commercial ? '' : ' hidden') + '><label class="inline"><input type="checkbox" data-f="checkedIn" ' + (f.checkedIn ? 'checked' : '') + '> Checked in <span class="small">(stops the check-in reminders)</span></label></span></div>' +
+    (open ? '<div class="item-b">' +
+      '<div class="grid2">' + fld('Route', 'data-f="route" placeholder="' + (car ? 'e.g. Home \u2192 EGKB' : 'e.g. LHR \u2192 EDI') + '"', f.route) + (car ? '' : fld(numLabel, 'data-f="flightNo" placeholder="' + (f.mode === 'flight' ? 'e.g. BA1456' : '') + '"', f.flightNo)) + '</div>' +
+      '<div class="grid2">' + fld(car ? 'Leave at (optional)' : 'Departs', 'data-f="depart"', f.depart, 'datetime-local') + (car ? '' : fld('Arrives (optional)', 'data-f="arrive"', f.arrive, 'datetime-local')) + '</div>' +
+      fld(car ? 'Notes' : 'Booking ref / notes', 'data-f="ref"', f.ref) +
+      '<p class="small" data-hint>' + esc(flightHint(f)) + '</p></div>' : '') +
+    '</div>';
+}
+function stayHTML(s) {
+  const open = UI.open.has(s.id);
+  return '<div class="item ' + (s.booked ? 'done' : '') + '" data-list="stays" data-id="' + s.id + '">' +
+    '<div class="item-h"><input type="checkbox" data-f="booked" aria-label="Booked" ' + (s.booked ? 'checked' : '') + '>' +
+    '<button class="item-t" data-act="toggle" data-id="' + s.id + '"><b>Accommodation</b>' +
+    '<span class="sum" data-sum>' + esc(itemSummary('stays', s)) + '</span></button>' +
+    '<button class="icon sm" data-act="del" aria-label="Remove">\u2715</button></div>' +
+    (open ? '<div class="item-b">' + fld('Location / hotel', 'data-f="location" placeholder="e.g. Nice"', s.location) +
+      '<div class="grid2">' + fld('Check-in', 'data-f="checkIn"', s.checkIn, 'date') + fld('Check-out', 'data-f="checkOut"', s.checkOut, 'date') + '</div>' +
+      fld('Booking ref / notes', 'data-f="ref"', s.ref) + '</div>' : '') +
+    '</div>';
+}
+const destNote = l => l.destManual ? 'Country set by hand.' : icaoCountry(l.to) ? 'Worked out from the destination airport ' + l.to + '.' : 'Enter the destination airport above and this is filled in for you.';
+function legHTML(l, i) {
+  const cb = (k, label) => '<label class="inline"><input type="checkbox" data-f="' + k + '" ' + (l[k] ? 'checked' : '') + '> ' + label + '</label>';
+  const st = fpStatus(l), gs = legStatus(l, 'gar'), gr = garRule(l);
+  const opt = (v, t) => '<option value="' + v + '"' + (l.dest === v ? ' selected' : '') + '>' + t + '</option>';
+  return '<div class="item ' + (isDone('legs', l) ? 'done' : '') + '" data-list="legs" data-id="' + l.id + '">' +
+    '<div class="item-h"><div class="item-t static"><b>Leg ' + (i + 1) + '</b><span class="sum" data-sum>' + esc(itemSummary('legs', l)) + '</span></div>' +
+    '<button class="icon sm" data-act="del" aria-label="Remove leg">\u2715</button></div>' +
+    '<div class="item-b"><div class="grid2">' + fld('From (ICAO)', 'data-f="from" maxlength="4" autocapitalize="characters" autocomplete="off" placeholder="e.g. EGKB"', l.from) +
+    fld('To (ICAO)', 'data-f="to" maxlength="4" autocapitalize="characters" autocomplete="off" placeholder="e.g. LFMN"', l.to) + '</div>' +
+    '<div class="grid2">' + fld('Departure date', 'data-f="date"', l.date, 'date') + fld('Departure time (UTC)', 'data-f="time"', l.time, 'time') + '</div>' +
+    '<label class="fld"><span>Destination country (sets the GAR rule)</span><select data-f="dest">' +
+      '<option value="">Choose\u2026</option>' + opt('UK', 'United Kingdom') + opt('FR', 'France') + opt('OTHER', 'Anywhere else') + '</select></label>' +
+    '<p class="small" data-destnote>' + esc(destNote(l)) + '</p>' +
+    cb('gar', 'Submit GAR') +
+    '<p class="small" data-garnote>' + esc(gr ? gr.note : '') + '</p>' +
+    '<p class="fpstat ' + gs.level + '" data-gar>' + esc(gs.text) + '</p>' +
+    cb('plan', 'File flight plan') +
+    '<div class="fprule"><b>Flight plan filing rule</b><span class="small"> \u2013 set by the departure state / ATC, so check it for each leg</span>' +
+    '<div class="grid2">' +
+    fld('Earliest you can file (hours before departure)', 'data-f="fpEarliest" inputmode="decimal" min="0" step="any" placeholder="e.g. 48 if only allowed within 48 h"', l.fpEarliest, 'number') +
+    fld('Latest you must file (hours before departure)', 'data-f="fpLatest" inputmode="decimal" min="0" step="any" placeholder="e.g. 48 if needed 48 h ahead"', l.fpLatest, 'number') +
+    '</div>' + cb('fpNoRule', 'No specific rule (any time before departure)') +
+    '<p class="fpstat ' + st.level + '" data-fp>' + esc(st.text) + '</p></div>' +
+    cb('handling', 'Handling, fuel & permits') + cb('wx', 'Weather & NOTAM briefing') + '</div></div>';
+}
+function taskHTML(t) {
+  return '<div class="item ' + (t.done ? 'done' : '') + '" data-list="tasks" data-id="' + t.id + '">' +
+    '<div class="item-h"><input type="checkbox" data-f="done" ' + (t.done ? 'checked' : '') + '>' +
+    '<div class="item-t static"><b>' + esc(t.label) + '</b></div>' +
+    '<button class="icon sm" data-act="del" aria-label="Remove">\u2715</button></div></div>';
+}
+function section(title, items, hint, addAct, addLabel) {
+  return '<section class="sect"><h3>' + title + '</h3>' + (items || '<p class="small">' + hint + '</p>') +
+    '<button class="btn" data-act="' + addAct + '">' + addLabel + '</button></section>';
+}
+
+function checklistHTML(j) {
+  const p = progress(j);
+  return '<div class="next"><b>Next up</b><span id="nextUp">' + (p.next ? esc(p.next) : 'All done \u2713') + '</span>' +
+      '<div class="track" id="progress"><i style="width:' + p.pct + '%"></i></div><span class="small" id="progText">' + p.done + ' of ' + p.total + ' done</span></div>' +
+    section('1 \u00B7 Flights you operate', j.legs.map(legHTML).join(''), 'Add each leg to track its GAR, flight plan, handling/fuel/permits and briefing.', 'add-leg', '+ Add leg') +
+    '<section class="sect"><h3>2 \u00B7 Outbound / return travel</h3>' +
+      '<h4 class="sub">Outbound</h4>' + (j.flights.filter(f => f.dir === 'out').map(flightHTML).join('') || '<p class="small">No outbound travel to book.</p>') + '<button class="btn" data-act="add-out">+ Add outbound travel</button>' +
+      '<h4 class="sub">Return</h4>' + (j.flights.filter(f => f.dir === 'return').map(flightHTML).join('') || '<p class="small">No return travel to book.</p>') + '<button class="btn" data-act="add-ret">+ Add return travel</button></section>' +
+    section('3 \u00B7 Accommodation', j.stays.map(stayHTML).join(''), 'No accommodation to book.', 'add-stay', '+ Add accommodation (another location or night)') +
+    '<section class="sect"><h3>4 \u00B7 Post-flight tasks</h3>' + j.tasks.map(taskHTML).join('') +
+      '<div class="addtask"><input id="newTask" placeholder="Add your own task" autocomplete="off"><button class="btn" data-act="add-task">Add</button></div></section>';
+}
+
+function renderDetail(app) {
+  const j = findJob(S.openId);
+  if (!j) { S.openId = null; return render(); }
+  const arch = isArchived(j);
+  if (arch) return renderArchived(app, j);
+
+  const head = '<header class="bar"><button class="btn ghost" data-act="back">\u2190 Jobs</button><span id="chip" class="chip"></span></header>';
+  let actions;
+  if (j.status === 'tentative') {
+    actions = '<div class="actions"><button class="btn good" data-act="confirm">Confirm job</button>' +
+      '<button class="btn danger" data-act="cancel">Cancel job</button></div>';
+  } else {
+    actions = '<div class="actions"><button class="btn good" data-act="complete">Mark job complete</button>' +
+      '<button class="btn danger" data-act="cancel">Cancel job</button></div>';
+  }
+  app.innerHTML = head + '<main class="detail">' +
+    '<span class="badge ' + j.status + '">' + j.status + '</span>' +
+    fld('Title', 'data-f="title"', j.title) +
+    fld('Route / locations', 'data-f="location" placeholder="e.g. EGKB - LFMN - EGKB"', j.location) +
+    '<div class="grid2">' + fld('Start date', 'data-f="startDate"', j.startDate, 'date') + fld('End date', 'data-f="endDate"', j.endDate, 'date') + '</div>' +
+    '<div class="grid2">' + fld('Start time', 'data-f="startTime"', j.startTime, 'time') + fld('End time', 'data-f="endTime"', j.endTime, 'time') + '</div>' +
+    '<label class="fld"><span>Notes</span><textarea data-f="notes" rows="5">' + esc(j.notes) + '</textarea></label>' +
+    '<p class="small" id="calstate">' + calState(j) + '</p>' +
+    (j.status === 'tentative' ? actions : '') +
+    (j.status === 'confirmed' ? checklistHTML(j) + actions : '') +
+    '</main>';
+  const c = $('#chip'); if (c) paintChip(c);
+}
+
+// ---------- new job (tentative by default; tick "Confirmed flight" for the full checklist) ----------
+const newLeg = date => ({ id: uid(), route: '', from: '', to: '', destManual: false, date: date || '', time: '', dest: 'UK', fpEarliest: '', fpLatest: '', fpNoRule: false, gar: false, plan: false, handling: false, wx: false,
+  fpDueEventId: '', fpOpenEventId: '', fpSig: '', garDueEventId: '', garOpenEventId: '', garSig: '' });
+function newDraft() {
+  return { id: 'draft', status: 'tentative', prevStatus: '', title: '', notes: '', location: '', startDate: '', startTime: '', endDate: '', endTime: '',
+    flights: [], stays: [], legs: [], tasks: [], eventId: '', calSig: '', created: '', updated: '', seeded: false };
+}
+function seedDraft(j) {            // the starting checklist for a confirmed job (same as the server's)
+  if (j.seeded) return;
+  j.seeded = true;
+  j.flights = [newFlight('out'), newFlight('return')];
+  j.stays = [{ id: uid(), location: '', checkIn: j.startDate, checkOut: j.endDate, ref: '', booked: false }];
+  j.legs = [newLeg(j.startDate)];
+  j.tasks = [{ id: uid(), label: 'Send invoice', done: false }, { id: uid(), label: 'Log expenses and receipts', done: false }];
+  UI.open.add(j.flights[0].id); UI.open.add(j.stays[0].id);
+}
+const draftDirty = j => ['title', 'notes', 'location', 'startDate', 'endDate', 'startTime', 'endTime'].some(k => j[k]);
+
+function renderNew(app) {
+  const j = S.draft;
+  if (!j) { S.openId = null; return render(); }
+  const conf = j.status === 'confirmed';
+  const tick = '<label class="confirmtick"><input type="checkbox" data-newconf="1" ' + (conf ? 'checked' : '') + '><span><b>Confirmed flight</b>' +
+    '<small>' + (conf ? 'Fill in as much as you know – you can add the rest later.' : 'Tick if the job is confirmed to get the full booking checklist.') + '</small></span></label>';
+  const notes = '<label class="fld"><span>Notes' + (conf ? '' : ' – whatever you know so far') + '</span><textarea data-f="notes" rows="' + (conf ? 4 : 5) +
+    '" placeholder="Dates, locations, times, passengers, special notes...">' + esc(j.notes) + '</textarea></label>';
+  let body;
+  if (!conf) {
+    body = notes +
+      fld('Title (optional)', 'data-f="title" placeholder="Defaults to the first line of your notes"', j.title) +
+      fld('Route / locations (optional)', 'data-f="location" placeholder="e.g. EGKB - LFMN - EGKB"', j.location) +
+      '<div class="grid2">' + fld('Start date', 'data-f="startDate"', j.startDate, 'date') + fld('End date', 'data-f="endDate"', j.endDate, 'date') + '</div>' +
+      '<details' + (j.startTime || j.endTime ? ' open' : '') + '><summary>Add times (optional)</summary><div class="grid2">' +
+      fld('Start time', 'data-f="startTime"', j.startTime, 'time') + fld('End time', 'data-f="endTime"', j.endTime, 'time') + '</div>' +
+      '<p class="small">With both times the calendar entry is timed; otherwise it is an all-day entry and the times appear in its description.</p></details>';
+  } else {
+    body = fld('Title', 'data-f="title" placeholder="Defaults to the first line of your notes"', j.title) +
+      fld('Route / locations', 'data-f="location" placeholder="e.g. EGKB - LFMN - EGKB"', j.location) +
+      '<div class="grid2">' + fld('Start date', 'data-f="startDate"', j.startDate, 'date') + fld('End date', 'data-f="endDate"', j.endDate, 'date') + '</div>' +
+      '<div class="grid2">' + fld('Start time', 'data-f="startTime"', j.startTime, 'time') + fld('End time', 'data-f="endTime"', j.endTime, 'time') + '</div>' +
+      notes + checklistHTML(j);
+  }
+  app.innerHTML = '<header class="bar"><button class="btn ghost" data-act="back">← Cancel</button><b>New job</b></header>' +
+    '<main class="detail">' + tick + body +
+    '<p class="small" id="newErr" style="color:var(--danger)"></p>' +
+    '<div class="actions"><button class="btn ' + (conf ? 'good' : 'primary') + '" data-act="save-new">' + (conf ? 'Save confirmed job' : 'Save tentative job') + '</button></div>' +
+    '<p class="small">' + (conf ? 'Goes on the calendar in green. Commercial flights with departure times get check-in reminders, and flight plan / GAR deadlines get their own events.'
+      : 'Goes on the calendar in orange if it has a start date.') + '</p></main>';
+}
+
+function renderArchived(app, j) {
+  const checks = j.status === 'completed' || j.prevStatus === 'confirmed' ? allChecks(j) : [];
+  app.innerHTML = '<header class="bar"><button class="btn ghost" data-act="back">\u2190 Jobs</button></header><main class="detail">' +
+    '<span class="badge ' + j.status + '">' + j.status + '</span>' +
+    '<h2 style="margin:8px 0 2px">' + esc(jobTitle(j)) + '</h2>' +
+    '<p class="meta small">' + (dateRange(j) || 'No date') + (j.location ? ' \u00B7 ' + esc(j.location) : '') + '</p>' +
+    (j.notes ? '<p style="white-space:pre-wrap">' + esc(j.notes) + '</p>' : '') +
+    (checks.length ? '<h3>Checklist when archived</h3>' + checks.map(c => '<div class="inline">' + (c.done ? '\u2705' : '\u2B1C') + ' ' + esc(c.label) + '</div>').join('') : '') +
+    '<div class="actions"><button class="btn primary" data-act="restore">Restore job</button></div>' +
+    '<p class="small">Restoring ' + (j.status === 'cancelled' ? 'puts the job back on the calendar.' : 'moves it back to Confirmed.') + '</p></main>';
+}
+
+function renderConnect(app) {
+  const cfg = getCfg() || {};
+  const url = S.cxUrl != null ? S.cxUrl : (cfg.url || '');
+  app.innerHTML = '<div class="connect"><h1>Pilot Jobs</h1>' +
+    '<p>Connect this device to your Pilot Jobs server. You only need to do this once on each device.</p>' +
+    (S.connectError ? '<p class="warn" role="alert">' + esc(S.connectError) + '</p>' : '') +
+    '<label class="fld"><span>Server address</span><input id="cxUrl" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" ' +
+    'placeholder="https://script.google.com/macros/s/…/exec" value="' + esc(url) + '"></label>' +
+    '<label class="fld"><span>Passcode</span><input id="cxKey" type="password" autocomplete="current-password" autocapitalize="off" spellcheck="false"></label>' +
+    '<button class="btn primary block" data-act="connect">Connect</button>' +
+    '<p class="small">The address and passcode are kept only in this browser, so anyone who can use this browser can use the app. Don’t connect a shared computer.</p></div>';
+}
+
+function render() {
+  const app = $('#app');
+  const y = window.scrollY;
+  if (!S.loaded) {
+    if (S.needConnect) { renderConnect(app); return; }
+    app.innerHTML = S.error
+      ? '<div class="empty">Couldn\u2019t load your jobs.<br><span class="small">' + esc(S.error) + '</span><br><br><button class="btn primary" data-act="refresh">Try again</button></div>'
+      : '<div class="empty">Loading\u2026</div>';
     return;
   }
-
-  const sig = JSON.stringify([job.title, l.route, l.date, l.time, k.extra(l)]);
-  const wantOpen = w.opens != null && w.opens >= now;
-  const wantDue = w.due >= now;
-  if (l[k.sig] === sig && (dueEv || !wantDue) && (openEv || !wantOpen)) return;   // unchanged
-
-  const what = (l.route || 'leg') + ' (' + job.title + ')';
-  const url = appUrl_();
-  const desc = [
-    k.text + ' for ' + what,
-    'Departure: ' + utcText_(w.dep),
-    w.opens != null ? 'Filing opens: ' + utcText_(w.opens) : '',
-    'Filing deadline: ' + utcText_(w.due),
-    'Tick "' + k.box + '" in Pilot Jobs to stop these reminders.',
-    url ? 'Open checklist: ' + url + '?job=' + job.id : ''
-  ].filter(Boolean).join('\n');
-
-  if (wantDue) {
-    const start = new Date(w.due), end = new Date(w.due + 15 * 60000);
-    const title = '\u26A0 ' + k.name + ' DEADLINE: ' + what;
-    let ev = dueEv;
-    if (!ev) ev = cal.createEvent(title, start, end, { description: desc });
-    else { ev.setTitle(title); ev.setDescription(desc); ev.setTime(start, end); }
-    ev.setColor(CalendarApp.EventColor[CONFIG.COLOURS.flightPlanDue]);
-    setReminders_(ev, k.minutes(), CONFIG.EMAIL_FLIGHT_PLAN_REMINDERS);
-    l[k.due] = ev.getId();
-  }   // a deadline that has already passed is left as it is (the app shows it as overdue)
-
-  if (wantOpen) {
-    const start = new Date(w.opens), end = new Date(w.opens + 15 * 60000);
-    const title = k.text + ' window opens: ' + what;
-    let ev = openEv;
-    if (!ev) ev = cal.createEvent(title, start, end, { description: desc });
-    else { ev.setTitle(title); ev.setDescription(desc); ev.setTime(start, end); }
-    ev.setColor(CalendarApp.EventColor[CONFIG.COLOURS.flightPlanOpen]);
-    setReminders_(ev, [0], CONFIG.EMAIL_FLIGHT_PLAN_REMINDERS);
-    l[k.open] = ev.getId();
-  } else if (openEv) {                 // window already open, so the "opens" marker is no longer useful
-    openEv.deleteEvent();
-    l[k.open] = '';
-  }
-  l[k.sig] = sig;
+  if (S.openId === 'import') renderImport(app); else if (S.openId === 'draft') renderNew(app); else if (S.openId) renderDetail(app); else renderList(app);
+  window.scrollTo(0, y);
 }
 
-/** Popup reminders at each time, then emails for the first and last (Calendar allows 5 per event). */
-function setReminders_(ev, minutes, withEmail) {
-  ev.removeAllReminders();
-  let n = 0;
-  minutes.forEach(function (m) { if (n < 5) { ev.addPopupReminder(m); n++; } });
-  if (withEmail) {
-    const ends = [minutes[0]];
-    if (minutes.length > 1) ends.push(minutes[minutes.length - 1]);
-    ends.forEach(function (m) { if (n < 5) { ev.addEmailReminder(m); n++; } });
-  }
-}
-
-function deleteAllEvents_(job) {
-  try { if (job.eventId) deleteEvent_(job.eventId); } catch (e) { console.error(e); }
-  job.flights.forEach(function (f) {
-    try { if (f.eventId) deleteEvent_(f.eventId); } catch (e) { console.error(e); }
+// update labels/progress without re-rendering (keeps keyboard focus while typing)
+function refreshDerived(j) {
+  const p = progress(j);
+  const bar = $('#progress i'); if (bar) bar.style.width = p.pct + '%';
+  const pt = $('#progText'); if (pt) pt.textContent = p.done + ' of ' + p.total + ' done';
+  const nx = $('#nextUp'); if (nx) nx.textContent = p.next || 'All done \u2713';
+  document.querySelectorAll('[data-list][data-id]').forEach(el => {
+    const list = el.dataset.list;
+    const it = (j[list] || []).find(x => x.id === el.dataset.id);
+    if (!it) return;
+    const s = el.querySelector('[data-sum]'); if (s) s.textContent = itemSummary(list, it);
+    el.classList.toggle('done', !!isDone(list, it));
+    const h = el.querySelector('[data-hint]'); if (h) h.textContent = flightHint(it);
+    const ck = el.querySelector('[data-checkin]'); if (ck) ck.hidden = !it.commercial;
+    const fp = el.querySelector('[data-fp]'); if (fp) { const s = fpStatus(it); fp.className = 'fpstat ' + s.level; fp.textContent = s.text; }
+    const ga = el.querySelector('[data-gar]'); if (ga) { const s = legStatus(it, 'gar'); ga.className = 'fpstat ' + s.level; ga.textContent = s.text; }
+    const gn = el.querySelector('[data-garnote]'); if (gn) { const r = garRule(it); gn.textContent = r ? r.note : ''; }
   });
-  job.legs.forEach(function (l) {
-    legEventIds_(l).forEach(function (id) { try { deleteEvent_(id); } catch (e) { console.error(e); } });
-  });
+  const cs = $('#calstate'); if (cs) cs.innerHTML = calState(j);
 }
 
-function getEvent_(cal, id) {
-  try { return cal.getEventById(id) || null; } catch (e) { return null; }
-}
-
-function deleteEvent_(id) {
-  const ev = getEvent_(calendar_(), id);
-  if (ev) ev.deleteEvent();
-}
-
-function eventTitle_(job) {
-  return job.status === 'tentative' ? 'TENTATIVE: ' + job.title : job.title;
-}
-
-function eventDescription_(job) {
-  const lines = [{ tentative: 'TENTATIVE - not yet confirmed', confirmed: 'CONFIRMED', completed: 'COMPLETED' }[job.status] || ''];
-  if (job.startTime || job.endTime) lines.push('Times: ' + [job.startTime, job.endTime].filter(Boolean).join(' - '));
-  if (job.notes) lines.push('', job.notes);
-  const url = appUrl_();
-  if (url) lines.push('', 'Open checklist: ' + url + '?job=' + job.id);
-  return lines.join('\n');
-}
-
-// ---------------------------------------------------------------------------
-// Email
-// ---------------------------------------------------------------------------
-
-function emailNewJob_(job) {
-  try {
-    const to = CONFIG.EMAIL_TO || Session.getEffectiveUser().getEmail();
-    if (!to) return;
-    const url = appUrl_();
-    const statusWord = job.status === 'confirmed' ? 'Confirmed' : 'Tentative';
-    const dates = job.startDate
-      ? job.startDate + (job.startTime ? ' ' + job.startTime : '') +
-        (job.endDate && job.endDate !== job.startDate ? ' to ' + job.endDate : '') +
-        (job.endTime ? ' ' + job.endTime : '')
-      : 'No date yet';
-    const html =
-      '<h2>' + esc_(job.title) + '</h2>' +
-      '<p><b>Status:</b> ' + statusWord + '</p>' +
-      '<p><b>Dates:</b> ' + esc_(dates) + '</p>' +
-      (job.location ? '<p><b>Route / locations:</b> ' + esc_(job.location) + '</p>' : '') +
-      (job.notes ? '<p><b>Notes:</b><br>' + esc_(job.notes).replace(/\n/g, '<br>') + '</p>' : '') +
-      (url ? '<p><a href="' + url + '?job=' + job.id + '">Open in Pilot Jobs</a></p>' : '');
-    const text = job.title + '\n' + statusWord + '\n' + dates +
-      (job.location ? '\n' + job.location : '') + (job.notes ? '\n\n' + job.notes : '') +
-      (url ? '\n\n' + url + '?job=' + job.id : '');
-    MailApp.sendEmail({ to: to, subject: statusWord + ' job: ' + job.title, body: text, htmlBody: html });
-  } catch (e) {
-    console.error('Email failed: ' + e);
+// ---------- events ----------
+function onField(e) {
+  const el = e.target;
+  if (!el.dataset || !el.dataset.f || !S.openId) return;
+  const j = findJob(S.openId);
+  if (!j || isArchived(j)) return;
+  const val = el.type === 'checkbox' ? el.checked : el.value;
+  const itemEl = el.closest('[data-list]');
+  if (itemEl) {
+    const it = j[itemEl.dataset.list].find(x => x.id === itemEl.dataset.id);
+    if (!it) return;
+    it[el.dataset.f] = val;
+    if (itemEl.dataset.list === 'flights' && el.dataset.f === 'mode') { it.commercial = val === 'flight'; refreshDerived(j); scheduleSave(j.id, 250); render(); return; }
+    if (itemEl.dataset.list === 'legs') {
+      const f = el.dataset.f;
+      if (f === 'from' || f === 'to') {
+        const up = String(val).toUpperCase().replace(/[^A-Z]/g, ''); if (up !== val) el.value = up;
+        it[f] = up; it.route = joinRoute(it);
+        if (f === 'to' && icaoCountry(up)) {            // a new destination: infer the country again
+          it.dest = icaoCountry(up); it.destManual = false;
+          const sel = itemEl.querySelector('[data-f=dest]'); if (sel) sel.value = it.dest;
+        }
+      } else if (f === 'dest') it.destManual = true;
+      const dn = itemEl.querySelector('[data-destnote]'); if (dn) dn.textContent = destNote(it);
+    }
+  } else {
+    j[el.dataset.f] = val;
   }
+  refreshDerived(j);
+  const quick = el.type === 'checkbox' || el.tagName === 'SELECT' || /date|time/.test(el.type);
+  scheduleSave(j.id, quick ? 250 : 700);
+}
+document.addEventListener('input', onField);
+document.addEventListener('change', onField);
+
+// ticking an item straight from the To do tab
+document.addEventListener('change', e => {
+  const el = e.target;
+  if (!el.dataset || !el.dataset.todo) return;
+  const p = el.dataset.todo.split('|');
+  const j = S.active.find(x => x.id === p[0]);
+  const it = j && j[p[1]].find(x => x.id === p[2]);
+  if (!it) return;
+  it[p[3]] = el.checked;
+  const row = el.closest('.todo'); if (row) row.classList.toggle('done', el.checked);
+  scheduleSave(j.id, 250);
+  setTimeout(() => { if (!S.openId && S.tab === 'todo') render(); }, 700);   // let the tick show, then drop the row
+});
+
+function addItem(list, item) {
+  const j = findJob(S.openId);
+  j[list].push(item);
+  if (list !== 'tasks' && list !== 'legs') UI.open.add(item.id);
+  scheduleSave(j.id, 100);
+  render();
+}
+const newFlight = dir => ({ id: uid(), dir, route: '', flightNo: '', depart: '', arrive: '', ref: '', booked: false, checkedIn: false, mode: 'flight', commercial: true, eventId: '', sig: '' });
+
+function moveToArchive(j) {
+  S.active = S.active.filter(x => x.id !== j.id);
+  S.archive = S.archive.filter(x => x.id !== j.id);
+  S.archive.push(j);
+}
+function replaceActive(job) {
+  S.archive = S.archive.filter(x => x.id !== job.id);
+  const i = S.active.findIndex(x => x.id === job.id);
+  if (i >= 0) S.active[i] = job; else S.active.push(job);
 }
 
-// ---------------------------------------------------------------------------
-// Storage (Google Sheet)
-// ---------------------------------------------------------------------------
-
-const _mem_ = {};
-
-function ss_() {
-  if (_mem_.ss) return _mem_.ss;
-  const props = PropertiesService.getScriptProperties();
-  const id = props.getProperty('SHEET_ID');
-  let ss = null;
-  if (id) { try { ss = SpreadsheetApp.openById(id); } catch (e) { ss = null; } }
-  if (!ss) {
-    ss = SpreadsheetApp.create('Pilot Jobs - data');
-    props.setProperty('SHEET_ID', ss.getId());
-    const jobs = ss.getSheets()[0].setName('Jobs');
-    const arch = ss.insertSheet('Archive');
-    [jobs, arch].forEach(function (sh) {
-      sh.getRange(1, 1, 1, 7).setValues([JOB_HEADERS_]).setFontWeight('bold');
-      sh.setFrozenRows(1);
-      [1, 4, 5, 6].forEach(function (c) { sh.getRange(1, c, sh.getMaxRows(), 1).setNumberFormat('@'); });
+const actions = {
+  'new'() { S.draft = newDraft(); S.openId = 'draft'; window.scrollTo(0, 0); render(); },
+  'save-new'() { saveDraft(); },
+  'import-open'() { S.imp = null; S.openId = 'import'; window.scrollTo(0, 0); render(); },
+  'import-close'() { S.imp = null; S.openId = null; render(); },
+  'import-pick'() { $('#impFile').click(); },
+  'import-go'() { importGo(); },
+  refresh() { load(); },
+  async connect() {
+    const url = ($('#cxUrl').value || '').trim(), key = $('#cxKey').value;
+    S.cxUrl = url;
+    if (!URL_OK.test(url)) { S.connectError = 'That doesn’t look like a Pilot Jobs server address. It should start with https://script.google.com/ and end in /exec.'; return render(); }
+    if (!key) { S.connectError = 'Enter the passcode.'; return render(); }
+    setCfg({ url: url, key: key });
+    S.connectError = '';
+    await busy(() => load(true));
+  },
+  async disconnect() {
+    if (!await askConfirm('Disconnect this device?', 'You’ll need the server address and passcode to connect again. Your jobs stay safe in Google.', 'Disconnect', true)) return;
+    clearCfg(); S.loaded = false; S.needConnect = true; S.connectError = ''; S.cxUrl = '';
+    S.active = []; S.archive = []; S.openId = null; S.draft = null; render();
+  },
+  tab(t) { S.tab = t.dataset.tab; render(); },
+  sort(t) { S.todoSort = t.dataset.sort; render(); },
+  open(t) { S.openId = t.dataset.id; window.scrollTo(0, 0); render(); },
+  async back() {
+    if (S.openId === 'draft') {
+      if (S.draft && draftDirty(S.draft) && !await askConfirm('Discard this new job?', 'Nothing has been saved yet.', 'Discard', true)) return;
+      S.draft = null; S.openId = null; render(); return;
+    }
+    if (S.openId) await flush(S.openId); S.openId = null; chip = ''; render();
+  },
+  toggle(t) { UI.open.has(t.dataset.id) ? UI.open.delete(t.dataset.id) : UI.open.add(t.dataset.id); render(); },
+  del(t) {
+    const itemEl = t.closest('[data-list]');
+    const j = findJob(S.openId);
+    j[itemEl.dataset.list] = j[itemEl.dataset.list].filter(x => x.id !== itemEl.dataset.id);
+    scheduleSave(j.id, 100); render();
+  },
+  'add-out'() { addItem('flights', newFlight('out')); },
+  'add-ret'() { addItem('flights', newFlight('return')); },
+  'add-stay'() {
+    const j = findJob(S.openId);
+    const last = j.stays[j.stays.length - 1];
+    addItem('stays', { id: uid(), location: '', checkIn: last ? last.checkOut : j.startDate, checkOut: '', ref: '', booked: false });
+  },
+  'add-leg'() { addItem('legs', newLeg('')); },
+  'add-task'() {
+    const inp = $('#newTask'); const v = inp.value.trim();
+    if (!v) { inp.focus(); return; }
+    addItem('tasks', { id: uid(), label: v, done: false });
+  },
+  async confirm() {
+    const j = findJob(S.openId);
+    if (!await askConfirm('Confirm this job?', 'It will turn ' + S.colours.confirmed + ' on the calendar and the booking checklist will appear.', 'Confirm job', false)) return;
+    await busy(async () => {
+      try {
+        await flush(j.id);
+        const job = await api('setStatus', j.id, 'confirm');
+        replaceActive(job); render(); window.scrollTo(0, 0);
+        toast(job.syncError || (job.eventId ? 'Confirmed \u2013 now ' + S.colours.confirmed + ' on your calendar' : 'Confirmed. Add a start date to put it on the calendar.'), job.syncError ? 'err' : '');
+      } catch (e) { toast(e.message, 'err'); }
     });
-    arch.getRange(1, 6).setValue('archived');
-    jobs.getRange(1, 6).setValue('updated');
+  },
+  async cancel() {
+    const j = findJob(S.openId);
+    if (!await askConfirm('Cancel this job?', 'It will be removed from the calendar (including any flight reminders) and kept in the Archive.', 'Cancel job', true)) return;
+    await busy(async () => {
+      try {
+        await flush(j.id);
+        const job = await api('setStatus', j.id, 'cancel');
+        moveToArchive(job); S.openId = null; render();
+        toast('Cancelled \u2013 removed from the calendar and archived');
+      } catch (e) { toast(e.message, 'err'); }
+    });
+  },
+  async complete() {
+    const j = findJob(S.openId);
+    const p = progress(j);
+    if (!await askConfirm('Mark job complete?', p.done < p.total ? (p.total - p.done) + ' checklist item(s) are still open. It will move to the Archive; calendar entries stay.' : 'It will move to the Archive; calendar entries stay.', 'Mark complete', false)) return;
+    await busy(async () => {
+      try {
+        await flush(j.id);
+        const job = await api('setStatus', j.id, 'complete');
+        moveToArchive(job); S.openId = null; render();
+        toast('Job completed and archived');
+      } catch (e) { toast(e.message, 'err'); }
+    });
+  },
+  async restore() {
+    const j = findJob(S.openId);
+    await busy(async () => {
+      try {
+        const job = await api('setStatus', j.id, 'restore');
+        replaceActive(job); S.tab = 'active'; render();
+        toast(job.syncError || 'Job restored', job.syncError ? 'err' : '');
+      } catch (e) { toast(e.message, 'err'); }
+    });
   }
-  _mem_.ss = ss;
-  return ss;
-}
+};
 
-function jobsSheet_() { return ss_().getSheetByName('Jobs'); }
-function archiveSheet_() { return ss_().getSheetByName('Archive'); }
+document.addEventListener('click', e => {
+  const t = e.target.closest('[data-act]');
+  if (!t || !actions[t.dataset.act]) return;
+  if (t.tagName === 'A') e.preventDefault();
+  actions[t.dataset.act](t, e);
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && e.target.matches && e.target.matches('.card')) e.target.click();
+  if (e.key === 'Enter' && e.target.id === 'newTask') { e.preventDefault(); actions['add-task'](); }
+  if (e.key === 'Enter' && (e.target.id === 'cxKey' || e.target.id === 'cxUrl')) { e.preventDefault(); actions.connect(); }
+});
 
-function parseJob_(s) {
-  try {
-    const j = JSON.parse(s);
-    ['flights', 'stays', 'legs', 'tasks'].forEach(function (k) { if (!Array.isArray(j[k])) j[k] = []; });
-    return j;
-  } catch (e) { return null; }
-}
-
-function readSheet_(sh) {
-  const last = sh.getLastRow();
-  if (last < 2) return [];
-  return sh.getRange(2, 7, last - 1, 1).getValues()
-    .map(function (r) { return parseJob_(r[0]); })
-    .filter(Boolean);
-}
-
-function findRow_(sh, id) {
-  const last = sh.getLastRow();
-  if (last < 2) return 0;
-  const ids = sh.getRange(2, 1, last - 1, 1).getValues();
-  for (let i = 0; i < ids.length; i++) if (String(ids[i][0]) === id) return i + 2;
-  return 0;
-}
-
-function readRow_(sh, id) {
-  const r = findRow_(sh, id);
-  return r ? parseJob_(sh.getRange(r, 7).getValue()) : null;
-}
-
-function cell_(v) {   // stop text being interpreted as a spreadsheet formula
-  v = String(v == null ? '' : v);
-  return /^[=+\-@]/.test(v) ? "'" + v : v;
-}
-
-function upsert_(sh, job, col6) {
-  const clean = JSON.parse(JSON.stringify(job));
-  delete clean.syncError;
-  const row = [[job.id, job.status, cell_(job.title), job.startDate, job.endDate, col6, JSON.stringify(clean)]];
-  const r = findRow_(sh, job.id);
-  sh.getRange(r || sh.getLastRow() + 1, 1, 1, 7).setValues(row);
-}
-
-function removeRow_(sh, id) {
-  const r = findRow_(sh, id);
-  if (r) sh.deleteRow(r);
-}
-
-// ---------------------------------------------------------------------------
-// Small helpers
-// ---------------------------------------------------------------------------
-
-function withLock_(fn) {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(25000);
-  try { return fn(); } finally { lock.releaseLock(); }
-}
-
-function appUrl_() { return String(CONFIG.APP_URL || '').trim(); }
-
-function newId_(prefix) { return prefix + Utilities.getUuid().replace(/-/g, '').slice(0, 11); }
-function itemId_(v) { const s = String(v || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 16); return s || newId_('i'); }
-function str_(v, max) { return String(v == null ? '' : v).slice(0, max || 500); }
-// ICAO code -> country for the GAR rules: EG = United Kingdom, LF = France, any other valid code = "anywhere else".
-// How the pilot travels to / from the job. Older data only had "commercial" (false meant train/driving/etc), which becomes "other".
-function travelMode_(f) {
-  if (['flight', 'train', 'car', 'other'].indexOf(f.mode) >= 0) return f.mode;
-  return (f.commercial === false || f.commercial === 'false') ? 'other' : 'flight';
-}
-function icaoCountry_(code) {
-  const c = String(code || '').toUpperCase();
-  if (!/^[A-Z]{4}$/.test(c)) return '';
-  return c.indexOf('EG') === 0 ? 'UK' : c.indexOf('LF') === 0 ? 'FR' : 'OTHER';
-}
-// Departure/destination ICAO codes of a leg. Old legs only had one "route" text such as "EGKB > LFMN": split it when possible.
-function legEnds_(l) {
-  let from = oneLine_(l.from, 4).toUpperCase().replace(/[^A-Z]/g, ''), to = oneLine_(l.to, 4).toUpperCase().replace(/[^A-Z]/g, '');
-  if (!from && !to && l.route) {
-    const m = /^\s*([A-Za-z]{4})\s*(?:>|\u2192|-|to)\s*([A-Za-z]{4})\s*$/i.exec(String(l.route));
-    if (m) { from = m[1].toUpperCase(); to = m[2].toUpperCase(); }
-  }
-  return { from: from, to: to };
-}
-// Country for a leg: the pilot's manual choice if they made one, otherwise inferred from the destination airport, otherwise the stored value.
-function legDest_(l, to) {
-  const valid = ['UK', 'FR', 'OTHER'].indexOf(l.dest) >= 0 ? l.dest : '';
-  if (bool_(l.destManual) && valid) return valid;
-  return icaoCountry_(to) || valid;
-}
-function oneLine_(v, max) { return str_(v, max).replace(/[\r\n]+/g, ' ').trim(); }
-function bool_(v) { return v === true || v === 'true'; }
-function num_(v) {   // hours; '' when blank or invalid
-  if (v === '' || v == null) return '';
-  const n = Number(v);
-  return isFinite(n) && n >= 0 ? Math.min(n, 720) : '';
-}
-function date_(v) { v = String(v || ''); return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : ''; }
-function time_(v) { v = String(v || ''); return /^\d{2}:\d{2}$/.test(v) ? v : ''; }
-function dt_(v) { v = String(v || ''); return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(v) ? v : ''; }
-function esc_(s) {
-  return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
-    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+async function saveDraft() {
+  const j = S.draft;
+  if (!j) return;
+  const err = $('#newErr');
+  if (!j.notes.trim() && !j.title.trim() && !j.location.trim()) { err.textContent = 'Add a few notes, a title or a route first.'; return; }
+  const conf = j.status === 'confirmed';
+  const data = { status: j.status };
+  ['title', 'notes', 'location', 'startDate', 'startTime', 'endDate', 'endTime'].forEach(k => { data[k] = String(j[k] || '').trim(); });
+  if (conf) ['flights', 'stays', 'legs', 'tasks'].forEach(k => { data[k] = j[k]; });
+  await busy(async () => {
+    try {
+      const job = await api('createJob', data);
+      S.active.push(job); S.draft = null; S.openId = null; S.tab = 'active'; render();
+      toast(job.syncError || (job.eventId
+        ? 'Saved as ' + job.status + ' and added to your calendar (' + (S.colours[job.status] || '') + ')'
+        : 'Saved as ' + job.status + ' – add a start date to put it on the calendar'), job.syncError ? 'err' : '');
+    } catch (e) { err.textContent = e.message; toast(e.message, 'err'); }
   });
 }
-function colourWord_(name) { return String(name || '').toLowerCase().replace(/_/g, ' '); }
 
-function parseYMD_(s) { const p = s.split('-').map(Number); return new Date(p[0], p[1] - 1, p[2]); }
-function parseDT_(d, t) {
-  const p = d.split('-').map(Number), q = t.split(':').map(Number);
-  return new Date(p[0], p[1] - 1, p[2], q[0], q[1]);
+// "Confirmed flight" tick-box on the new-job page
+document.addEventListener('change', e => {
+  const el = e.target;
+  if (!el.dataset || !el.dataset.newconf || !S.draft) return;
+  S.draft.status = el.checked ? 'confirmed' : 'tentative';
+  if (el.checked) seedDraft(S.draft);
+  render();
+});
+
+// ---------- import jobs from a spreadsheet (.xlsx / .csv, made from the template) ----------
+// The file is read in this browser (SheetJS, loaded from cdnjs only when needed); nothing is sent anywhere
+// except the finished jobs, which go to your own Apps Script exactly like jobs typed in by hand.
+const XLSX_URL = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+const IMPORT_MAX_JOBS = 25;
+const HEAD_KEYS = { job: ['job', 'jobtitle', 'title', 'trip'], status: ['status'], date: ['date', 'departuredate'],
+  time: ['time', 'timeutc', 'departuretime', 'departuretimeutc'], from: ['from', 'fromicao', 'origin'], to: ['to', 'toicao', 'destination'], notes: ['notes', 'note'] };
+const isoDate = (y, m, d) => {
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d
+    ? y + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0') : null;
+};
+// A date cell is either an Excel serial number or text (2026-11-10 or UK style 10/11/2026). Returns '' for blank, null for unreadable.
+function cellDate(v) {
+  if (v === '' || v == null) return '';
+  if (v instanceof Date) return isNaN(v) ? null : isoDate(v.getFullYear(), v.getMonth() + 1, v.getDate());
+  if (typeof v === 'number') { const d = new Date(Date.UTC(1899, 11, 30) + Math.floor(v) * 864e5); return v >= 1 ? isoDate(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate()) : null; }
+  const s = String(v).trim(); let m;
+  if ((m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s))) return isoDate(+m[1], +m[2], +m[3]);
+  if ((m = /^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2}|\d{4})$/.exec(s))) return isoDate(m[3].length === 2 ? 2000 + +m[3] : +m[3], +m[2], +m[1]);
+  return null;
 }
-function addDays_(d, n) { const x = new Date(d.getTime()); x.setDate(x.getDate() + n); return x; }
+// A time cell is an Excel time (a fraction of a day) or text (09:00, 0900, 9.30, 09:00Z). Returns '' for blank, null for unreadable.
+function cellTime(v) {
+  if (v === '' || v == null) return '';
+  const hm = (h, m) => h < 24 && m < 60 ? String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0') : null;
+  if (typeof v === 'number') { const mins = Math.round((v - Math.floor(v)) * 1440) % 1440; return hm(Math.floor(mins / 60), mins % 60); }
+  const m = /^(\d{1,2})\s*[:.h]?\s*(\d{2})(?::\d{2})?\s*z?$/i.exec(String(v).trim());
+  return m ? hm(+m[1], +m[2]) : null;
+}
+const normHead = s => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+// rows = what SheetJS gives for a sheet: one object per row, keyed by the header text.
+function parseImport(rows) {
+  const issues = [], groups = [], byKey = {};
+  const colOf = {};
+  if (rows.length) Object.keys(rows[0]).forEach(h => { const n = normHead(h); Object.keys(HEAD_KEYS).forEach(k => { if (!colOf[k] && HEAD_KEYS[k].includes(n)) colOf[k] = h; }); });
+  if (!colOf.from || !colOf.to) return { groups: [], issues: ['I couldn’t find the “From” and “To” columns. Please use the template (the first row must be its headings).'], read: 0 };
+  const get = (r, k) => colOf[k] ? r[colOf[k]] : '';
+  let last = '', read = 0;
+  rows.forEach((r, i) => {
+    const n = i + 2;                                                      // spreadsheet row number (row 1 is the headings)
+    if (Object.keys(colOf).every(k => String(get(r, k)).trim() === '')) return;
+    read++;
+    const from = String(get(r, 'from')).trim().toUpperCase(), to = String(get(r, 'to')).trim().toUpperCase();
+    const date = cellDate(get(r, 'date')), time = cellTime(get(r, 'time'));
+    const bad = [];
+    if (!/^[A-Z]{4}$/.test(from)) bad.push('From must be a 4-letter ICAO code');
+    if (!/^[A-Z]{4}$/.test(to)) bad.push('To must be a 4-letter ICAO code');
+    if (date === null) bad.push('the date isn’t readable');
+    if (time === null) bad.push('the time isn’t readable');
+    if (bad.length) { issues.push('Row ' + n + ' skipped: ' + bad.join(', ') + '.'); return; }
+    let title = String(get(r, 'job')).trim() || last; last = title;
+    if (!title) title = 'Imported job';
+    const key = title.toLowerCase();
+    let g = byKey[key];
+    if (!g) { g = byKey[key] = { title: title, status: '', notes: '', legs: [] }; groups.push(g); }
+    const st = String(get(r, 'status')).trim().toLowerCase();
+    if (st && !g.status) {
+      if (/^(c|conf)/.test(st)) g.status = 'confirmed'; else if (/^(t|tent)/.test(st)) g.status = 'tentative';
+      else issues.push('Row ' + n + ': status “' + get(r, 'status') + '” isn’t Confirmed or Tentative – treated as Confirmed.');
+    }
+    const note = String(get(r, 'notes')).trim(); if (note && !g.notes.includes(note)) g.notes += (g.notes ? '\n' : '') + note;
+    if (date === '') issues.push('Row ' + n + ': no date, so deadlines can’t be worked out for this leg.');
+    g.legs.push({ from: from, to: to, date: date, time: time });
+  });
+  groups.forEach(g => {
+    g.status = g.status || 'confirmed';
+    const ds = g.legs.map(l => l.date).filter(Boolean).sort();
+    g.start = ds[0] || ''; g.end = ds[ds.length - 1] || ''; g.pick = true;
+    g.dup = S.active.some(j => (j.title || '').toLowerCase() === g.title.toLowerCase() && (j.startDate || '') === g.start);
+    if (g.dup) g.pick = false;
+  });
+  return { groups: groups, issues: issues, read: read };
+}
+// What createJob() receives: confirmed jobs get a full starting checklist with the legs filled in; tentative jobs keep the legs in their notes.
+function importPayload(g) {
+  const data = { title: g.title, status: g.status, notes: g.notes, location: '', startDate: g.start, endDate: g.end || g.start, startTime: '', endTime: '' };
+  if (g.status === 'confirmed') {
+    data.flights = [newFlight('out'), newFlight('return')];
+    data.stays = [{ id: uid(), location: '', checkIn: g.start, checkOut: g.end || g.start, ref: '', booked: false }];
+    data.legs = g.legs.map(l => Object.assign(newLeg(l.date), { from: l.from, to: l.to, route: l.from + ' > ' + l.to, time: l.time, dest: icaoCountry(l.to) || 'UK' }));
+    data.tasks = [{ id: uid(), label: 'Send invoice', done: false }, { id: uid(), label: 'Log expenses and receipts', done: false }];
+  } else {
+    data.notes = [g.notes].concat(g.legs.map(l => l.from + ' > ' + l.to + (l.date ? ' ' + l.date : '') + (l.time ? ' ' + l.time + 'Z' : ''))).filter(Boolean).join('\n');
+  }
+  return data;
+}
+function loadXlsxLib() {
+  if (window.XLSX) return Promise.resolve();
+  return new Promise((ok, fail) => {
+    const s = document.createElement('script'); s.src = XLSX_URL;
+    s.onload = ok; s.onerror = () => fail(new Error('Couldn’t load the spreadsheet reader – check your connection and try again.'));
+    document.head.appendChild(s);
+  });
+}
+async function importFile(file) {
+  S.imp = { name: file.name, groups: [], issues: [], read: 0, error: '', ready: false };
+  render();
+  try {
+    await loadXlsxLib();
+    const wb = window.XLSX.read(await file.arrayBuffer(), { type: 'array' });
+    const name = wb.SheetNames.find(n => /^legs$/i.test(n)) || wb.SheetNames[0];
+    const rows = window.XLSX.utils.sheet_to_json(wb.Sheets[name], { defval: '', raw: true });
+    Object.assign(S.imp, parseImport(rows), { ready: true });
+  } catch (e) { S.imp.error = e.message || String(e); }
+  render();
+}
+function renderImport(app) {
+  const imp = S.imp;
+  const head = '<header class="bar"><button class="btn ghost" data-act="import-close">← Jobs</button><b>Import jobs</b></header>';
+  let body = '<section class="sect"><p>Fill in the template, then choose the file here. Each different <b>Job title</b> becomes one job; each row is one flight leg.</p>' +
+    '<p><a class="btn" href="pilot-jobs-import-template.xlsx" download>Download the template</a></p>' +
+    '<p class="small">Using Google Sheets? Copy the template into Sheets, fill it in, then <b>File → Download → Microsoft Excel (.xlsx)</b> (on the phone app: Share &amp; export → Save as Excel). A .csv file works too.</p>' +
+    '<input type="file" id="impFile" accept=".xlsx,.xls,.csv" hidden>' +
+    '<button class="btn primary" data-act="import-pick">' + (imp ? 'Choose a different file' : 'Choose spreadsheet') + '</button></section>';
+  if (imp) {
+    if (imp.error) body += '<p class="fpstat late">' + esc(imp.error) + '</p>';
+    if (!imp.ready && !imp.error) body += '<p class="small">Reading ' + esc(imp.name) + '…</p>';
+    if (imp.ready) {
+      body += '<h2 class="sec">' + esc(imp.name) + ' <small>' + imp.groups.length + ' job' + (imp.groups.length === 1 ? '' : 's') + ', ' + imp.read + ' row' + (imp.read === 1 ? '' : 's') + '</small></h2>';
+      if (!imp.groups.length) body += '<div class="empty">No jobs found in that file.</div>';
+      body += imp.groups.map((g, i) => '<div class="item"><div class="item-h"><label class="inline"><input type="checkbox" data-imp="' + i + '" ' + (g.pick ? 'checked' : '') + '> <b>' + esc(g.title) + '</b></label>' +
+        '<span class="chip ' + g.status + '">' + g.status + '</span></div><div class="item-sub">' +
+        (g.dup ? '<p class="fpstat prompt">Looks like a job you already have (same title and start date), so it’s unticked.</p>' : '') +
+        g.legs.map(l => '<div class="small">' + esc(l.from + ' → ' + l.to) + ' · ' + esc(l.date ? fmtDate(l.date) : 'no date') + (l.time ? ' ' + l.time + 'Z' : '') +
+          (g.status === 'confirmed' ? ' · GAR rule: ' + ({ UK: 'UK', FR: 'France', OTHER: 'none' }[icaoCountry(l.to)] || 'UK') : '') + '</div>').join('') +
+        (g.status === 'tentative' ? '<div class="small">Tentative: the legs are saved in the notes.</div>' : '') + '</div></div>').join('');
+      if (imp.issues.length) body += '<section class="sect"><h3>Check these</h3>' + imp.issues.map(t => '<p class="fpstat prompt">' + esc(t) + '</p>').join('') + '</section>';
+      const n = imp.groups.filter(g => g.pick).length;
+      if (imp.groups.length) body += '<p class="small" id="impErr"></p><button class="btn primary block" data-act="import-go" ' + (n ? '' : 'disabled') + ' id="impGo">Import ' + n + ' job' + (n === 1 ? '' : 's') + '</button>';
+    }
+  }
+  app.innerHTML = head + '<main>' + body + '</main>';
+}
+async function importGo() {
+  const imp = S.imp, picks = imp.groups.filter(g => g.pick), err = $('#impErr');
+  if (picks.length > IMPORT_MAX_JOBS) { err.textContent = 'Please import at most ' + IMPORT_MAX_JOBS + ' jobs at a time.'; return; }
+  let done = 0;
+  await busy(async () => {
+    for (const g of picks) {
+      try { const job = await api('createJob', importPayload(g)); S.active.push(job); g.pick = false; g.imported = true; done++; }
+      catch (e) { imp.error = 'Imported ' + done + ' of ' + picks.length + '. Stopped at “' + g.title + '”: ' + e.message; break; }
+    }
+  });
+  if (imp.error) { imp.groups = imp.groups.filter(g => !g.imported); render(); return; }
+  S.imp = null; S.openId = null; S.tab = 'active'; render();
+  toast('Imported ' + done + ' job' + (done === 1 ? '' : 's') + ' – confirmed ones are on your calendar', '');
+}
+if (window.PILOT_MOCK) window.PILOT_TEST = { parseImport, cellDate, cellTime, importFile };   // lets the automated tests reach the import helpers
+document.addEventListener('change', e => {
+  const el = e.target;
+  if (el.id === 'impFile' && el.files && el.files[0]) importFile(el.files[0]);
+  if (el.dataset && el.dataset.imp !== undefined && S.imp) { S.imp.groups[+el.dataset.imp].pick = el.checked; render(); }
+});
+
+// ---------- boot ----------
+// fromConnect = true when the person has just typed an address/passcode, so any failure goes back to that form
+async function load(fromConnect) {
+  if (!window.PILOT_MOCK) {
+    const c = getCfg();
+    if (!c || !c.key) { S.needConnect = true; render(); return; }      // first visit on this device
+  }
+  try {
+    const r = await api('getAll');
+    S.active = r.active; S.archive = r.archive; S.appUrl = r.appUrl;
+    S.active.concat(S.archive).forEach(j => { (j.legs || []).forEach(splitLeg); (j.flights || []).forEach(fixTravel); });
+    S.calendarName = r.calendarName; S.reminders = r.reminderMinutes; S.colours = r.colours;
+    S.loaded = true; S.error = ''; S.needConnect = false; S.connectError = '';
+    if (OPEN_JOB_ID && !S.opened) { S.opened = true; if (findJob(OPEN_JOB_ID)) S.openId = OPEN_JOB_ID; }
+  } catch (e) {
+    if (e.code === 'auth' || e.code === 'locked' || e.code === 'not_configured') {
+      const c = getCfg();
+      if (c && e.code !== 'locked') setCfg({ url: c.url, key: '' });   // forget a rejected passcode (but keep the address)
+      S.loaded = false; S.needConnect = true; S.connectError = e.message;
+    } else if (fromConnect) {
+      S.loaded = false; S.needConnect = true; S.connectError = e.message;
+    } else if (S.loaded) {
+      toast(e.message, 'err');                                           // a refresh failed: keep showing what we have
+    } else {
+      S.error = e.message;
+    }
+  }
+  render();
+}
+render();
+load();
+})();
+</script>
+</body>
+</html>
