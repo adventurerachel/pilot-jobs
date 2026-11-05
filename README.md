@@ -11,6 +11,8 @@ This guide does two jobs: it tells you **what to do**, and for each step it expl
 | `Code.gs` | Google Apps Script (the "backend": talks to Calendar, Sheets and Gmail) |
 | `appsscript.json` | Google Apps Script (its settings file, called the "manifest") |
 | `index.html` | A web host such as GitHub Pages (the "page" people look at) |
+| `manifest.webmanifest`, `icon-192.png`, `icon-512.png`, `icon-maskable-512.png`, `apple-touch-icon.png`, `favicon.svg` | The same web host, in the same folder as `index.html` (the app's icon and name; see "Customising the icon") |
+| `logo.svg` | Nowhere: the editable master of the logo |
 | `preview.html` | Nowhere – open it to look at the layout with sample data, no setup needed |
 
 ---
@@ -88,7 +90,7 @@ The page is a single file, so any static host works. GitHub Pages is free:
 **9. Create a repository.** On github.com: **New repository**. Name it, for example, `pilot-jobs`. Choose **Public**.
 *Why public?* Free GitHub Pages needs it. That's fine here, because `index.html` contains no secrets: no address, no passcode, no data. Each person types those in on their own device.
 
-**10. Upload the page.** **Add file → Upload files** → drag in `index.html` → **Commit changes**.
+**10. Upload the page.** **Add file → Upload files** → drag in `index.html` **and the icon files and `manifest.webmanifest`** (you can select them all at once) → **Commit changes**. They must sit in the same place as `index.html`.
 
 **11. Switch on Pages.** **Settings → Pages**. Under *Build and deployment*, Source: **Deploy from a branch**; Branch: **main**, folder **/(root)**; **Save**. After a minute or so the page shows its address, like `https://yourname.github.io/pilot-jobs/`. That is the app's address.
 *What this does:* GitHub now serves your `index.html` over HTTPS at that address. HTTPS matters because it encrypts the passcode in transit.
@@ -103,13 +105,15 @@ The page is a single file, so any static host works. GitHub Pages is free:
 *What this does:* the page saves both in that browser's localStorage and uses them for every request. Anyone who can use that browser can use the app, so don't connect a shared computer. **Disconnect this device** (at the bottom of the job list) forgets them.
 The page refuses any address that isn't a `script.google.com … /exec` address, so a mistyped or malicious address can't receive the passcode.
 
-**14.** Bookmark it. On the Pixel in Chrome: ⋮ menu → **Add to Home screen** for an app-style icon. Repeat step 13 on each device.
+**14.** Bookmark it. On the Pixel in Chrome: ⋮ menu → **Add to Home screen** (or **Install app**, if Chrome offers it) for an app icon that opens full-screen. Repeat step 13 on each device. If you added the shortcut before the icon files were uploaded, remove it and add it again, because phones remember the old icon.
 
 ### Updating later
 
 - **Changed `Code.gs`:** paste it in, then **Deploy → Manage deployments → ✏️ → Version: New version → Deploy**. The address stays the same. Without a new version, the live app keeps running the old code – the most common reason a change "doesn't work".
 - **Changed `index.html`:** on GitHub open `index.html` → upload the new file over it (**Add file → Upload files**, same name). Wait a minute, then refresh the page (on a phone, close and reopen it or clear the site's data if it still looks old).
 - **Changing the passcode:** edit the script property. Each device gets the "passcode wasn't accepted" screen next time and asks again.
+
+**Customising the icon.** The icon is a runway seen on final approach, with an orange sun, on sky blue and green. `logo.svg` is the master: open it in a text editor or a vector tool such as Inkscape or Figma to change the colours (the two sky-blue stops in `<linearGradient>`, `#FF8A1F` for the sun, `#3FA371` for the grass, `#2D3340` for the tarmac) or the shape. Then re-export the PNGs at 512×512, 192×192 and 180×180 (keep the artwork inside the central 80% so Android's circle crop doesn't clip it), keep the same file names, and upload them over the old ones. To change the name shown under the icon, edit `name` and `short_name` in `manifest.webmanifest` (keep `short_name` under about 12 characters). The same two colours appear as `theme_color` and `background_color` there and in `index.html`'s `theme-color` tag.
 
 ---
 
@@ -137,12 +141,14 @@ The page refuses any address that isn't a `script.google.com … /exec` address,
 | **Quick add** | Tap **+ New job**. By default it's the quick tentative form: type whatever is known (notes, route, dates, times) and save; it goes on the calendar in orange. Tick **Confirmed flight** at the top to switch to the full confirmed form (title, route, dates and times, notes, plus outbound/return flights, accommodation, legs with destination and filing rules, and after-job tasks); it's saved straight to green. Nothing is saved until you tap Save. |
 | **Calendar** | If there is a start date, an **orange** event ("TENTATIVE: …") is created on a calendar called *Pilot Jobs*, and a summary email is sent to him. Jobs with no date yet are saved and join the calendar as soon as a date is added. |
 | **Confirm** | The event turns **green** (and loses the TENTATIVE prefix) and the checklist appears with a **Next up** prompt. |
-| **Checklist** | 1. Outbound travel · 2. Accommodation (as many stays/locations/nights as needed) · 3. Flights you operate – per leg: GAR, flight plan, handling/fuel/permits, weather & NOTAM briefing · 4. Return travel · 5. After the job: invoice, expenses, plus your own tasks. |
+| **Checklist** | 1. Flights you operate – per leg: GAR, flight plan, handling/fuel/permits, weather & NOTAM briefing · 2. Outbound / return travel – booking and check-in for each commercial flight · 3. Accommodation (as many stays/locations/nights as needed) · 4. Post-flight tasks: invoice, expenses, plus your own tasks. "Next up" and the To do tab's *By task* view follow this order. |
 | **To do tab** | Every outstanding checklist item across confirmed jobs, sortable **by date** or **by task** (e.g. all hotel bookings together). Items can be ticked straight from the list. |
-| **GAR deadlines** | Each leg's destination country defaults to **UK** (change it per leg) and the app applies the rules: **UK** arrival – GAR no earlier than 48 h before flight time; **France, Mon–Fri** – within 24 h of flight time (not earlier); **France, Sat/Sun** – at least 48 h before; **anywhere else** – no rule. The weekday is that of the departure in Paris time. |
+| **GAR deadlines** | Each leg has **From** and **To** ICAO airport fields, and the destination country is worked out from the **To** code (**EG…** = UK, **LF…** = France, any other code = anywhere else). You can still override the country by hand; it stays until you change the destination airport. With no airport entered it defaults to **UK**. Then the app applies the rules: **UK** arrival – GAR no earlier than 48 h before flight time; **France, Mon–Fri** – within 24 h of flight time (not earlier); **France, Sat/Sun** – at least 48 h before; **anywhere else** – no rule. The weekday is that of the departure in Paris time. |
 | **Flight plan deadlines** | Each leg has a departure time (UTC) and a filing rule: *earliest you can file* and/or *latest you must file*, in hours before departure. "Only within 48 h of flight" = earliest 48; "at least 48 h ahead" = latest 48. |
 | **Deadline alerts** | The app shows each GAR / flight plan status live (too early / window open / submit now / overdue) and a red banner on the Active and To do tabs when a deadline is within 24 h or has passed. The calendar gets a red **DEADLINE** event with popups 24 h, 6 h, 1 h and 15 min before (plus one email at 24 h) and, if there's an earliest limit, a yellow "window opens" marker. Ticking the box removes them. |
-| **Commercial flights** | Enter a departure time on a flight and it gets its own **blue** calendar event with reminders **4 h and 2 h before** (popup and email). Untick "Commercial flight" for trains/driving. |
+| **Commercial flights** | Enter a departure time on a flight and it gets its own **blue** calendar event with reminders **24 h, 4 h and 2 h before** (popups, plus emails at 24 h and 2 h). Untick "Commercial flight" for trains/driving. |
+| **Import from a spreadsheet** | On the Active tab, tap **Import jobs from a spreadsheet**. Download `pilot-jobs-import-template.xlsx`, fill in one row per flight leg (job title, status, date, departure time in UTC, From and To ICAO codes), then choose the saved .xlsx or .csv. You get a preview (problem rows are listed and skipped, jobs that already exist are unticked) and nothing is saved until you tap Import. Confirmed jobs get the full checklist with the legs filled in, so GAR countries and deadlines follow from the airports; tentative jobs keep the legs in their notes. Google Sheets users download the sheet as .xlsx first. The file is read in the browser (the reader library is loaded from cdnjs when first needed); only the finished jobs are sent to your script. **Upload `pilot-jobs-import-template.xlsx` to GitHub Pages next to `index.html`.** |
+| **Check-in task** | Each commercial flight has a tick-box **Checked in** and a matching task in the checklist and the To do tab (departure time shown). Ticking it switches that flight's 24 h / 4 h / 2 h reminders off. Booking and checking in are separate tasks: *Book outbound/return flights* and *Check in for flights*. |
 | **Cancel** | Removes the job and its flight/deadline events from the calendar and moves it to the **Archive** tab and *Archive* sheet. It can be restored. |
 | **Complete** | Moves a finished job to the Archive; calendar entries stay. |
 
@@ -152,6 +158,7 @@ Everything autosaves. The data lives in the Google Sheet **Pilot Jobs – data**
 
 - **No inbound calendar email.** Google Calendar has no address that turns emails into events, so the app creates events directly. The email he gets is a summary of each new job with a link back to it (if `APP_URL` is set).
 - **Notifications on his Pixel.** Calendar popup reminders arrive as push notifications from the Google Calendar app. Check on the phone: Google Calendar → Settings → *Pilot Jobs* → notifications on; Android Settings → Apps → Calendar → Notifications → allow the reminders channel to alert (and, if wanted, bypass Do Not Disturb). The 15-minute reminder on every deadline is the "very close" alert; change the times in `FLIGHT_PLAN_REMINDER_MINUTES` / `GAR_REMINDER_MINUTES`. Google allows five reminders per event.
+- **Check-in reminders staying on screen.** Google Calendar's popup reminders are ordinary Android notifications and, by default, stay in the shade until swiped away. A script cannot force that, because it is a phone setting: on the Pixel, long-press a Calendar notification → *Settings* (or Android Settings → Apps → Calendar → Notifications) and make sure the reminders channel is set to *Alerting* with *Pop on screen*, and that it isn't being auto-cleared by a battery/"clear notifications" tool.
 - **The red banner is in-app only.** It shows while the page is open. The calendar notifications are what reach him when it isn't.
 - **Flight plans and GARs are tracking tick-boxes only.** The app submits nothing. The GAR rules above are built in; for **flight plans** it knows no country's rules – he enters the rule for each leg and it does the arithmetic. If no rule is entered it prompts him to check, and treats departure as the deadline until he does.
 - **Times for GAR and flight plans are UTC.** Enter each leg's departure time in UTC (Zulu). Deadlines are shown in UTC; calendar events show in his own time zone.
