@@ -645,11 +645,13 @@ const fld = (label, attrs, val, type) =>
 function flightHTML(f) {
   fixTravel(f);
   const open = UI.open.has(f.id), car = f.mode === 'car';
+  const modeIcon = { flight: '\u2708\uFE0F', train: '\uD83D\uDE86', car: '\uD83D\uDE97' }[f.mode] || '';
   const what = { flight: 'flight', train: 'train', car: '\u2013 driving', other: 'travel' }[f.mode] || 'flight';
   const numLabel = { flight: 'Flight no.', train: 'Train / service', other: 'Service / number' }[f.mode];
   const modeSel = '<label class="inline">Travel by <select data-f="mode" aria-label="Travel by">' + MODES.map(m => '<option value="' + m[0] + '"' + (f.mode === m[0] ? ' selected' : '') + '>' + m[1] + '</option>').join('') + '</select></label>';
   return '<div class="item ' + (isDone('flights', f) ? 'done' : '') + '" data-list="flights" data-id="' + f.id + '">' +
-    '<div class="item-h">' + (car ? '<span class="modeicon" aria-hidden="true">\uD83D\uDE97</span>' : '<input type="checkbox" data-f="booked" aria-label="Booked" ' + (f.booked ? 'checked' : '') + '>') +
+    '<div class="item-h">' + (modeIcon ? '<span class="modeicon" aria-hidden="true">' + modeIcon + '</span>' : '') +
+    (car ? '' : '<input type="checkbox" data-f="booked" aria-label="Booked" ' + (f.booked ? 'checked' : '') + '>') +
     '<button class="item-t" data-act="toggle" data-id="' + f.id + '"><b>' + (f.dir === 'out' ? 'Outbound' : 'Return') + ' ' + what + '</b>' +
     '<span class="sum" data-sum>' + esc(itemSummary('flights', f)) + '</span></button>' +
     '<button class="icon sm" data-act="del" aria-label="Remove">\u2715</button></div>' +
