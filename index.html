@@ -378,6 +378,13 @@ const findJob = id => id === 'draft' ? S.draft : (S.active.find(j => j.id === id
 const isArchived = j => S.archive.indexOf(j) >= 0;
 
 // ---------- checklist model ----------
+// Keep checkpoint icons centralised so they appear consistently throughout the app.
+function taskDisplayLabel(label) {
+  const value = String(label || '');
+  if (/invoice/i.test(value)) return '\uD83E\uDDFE ' + value;
+  if (/expense|receipt/i.test(value)) return '\uD83D\uDCB7 ' + value;
+  return value;
+}
 const legName = l => l.route ? ' (' + l.route + ')' : '';
 // How the pilot gets to / from the job. "car" = driving himself: nothing to book, no calendar event.
 const MODES = [['flight', 'Flight'], ['train', 'Train'], ['car', 'Driving'], ['other', 'Other (bus, ferry\u2026)']];
@@ -394,7 +401,7 @@ function driveEnd(f) {
 const fixTravel = f => { f.mode = travelMode(f); f.commercial = f.mode === 'flight'; return f; };
 const CATS = [['gar', 'Submit GARs'], ['plan', 'File flight plans'], ['handling', 'Handling, fuel & permits'], ['wx', 'Weather & NOTAM briefings'],
   ['out', 'Book outbound travel'], ['ret', 'Book return travel'], ['checkin', 'Check in for flights'],
-  ['stay', 'Book accommodation'], ['after', 'Post-flight tasks']];
+  ['stay', '\uD83C\uDFE8 Book accommodation'], ['after', 'Post-flight tasks']];
 function allChecks(j) {
   const out = [];
   j.flights.forEach(fixTravel);
@@ -422,9 +429,9 @@ function allChecks(j) {
     out.push({ cat: 'checkin', label: 'Check in for ' + (dir === 'out' ? 'outbound' : 'return') + ' flight' + (f.route ? ' (' + f.route + ')' : ''),
       detail: f.route, done: f.checkedIn, list: 'flights', id: f.id, field: 'checkedIn', date: day(f.depart) || (dir === 'out' ? start : end), when: f.depart })));
   j.stays.forEach(s =>
-    out.push({ cat: 'stay', label: 'Book accommodation' + (s.location ? ' \u2013 ' + s.location : ''), detail: s.location, done: s.booked,
+    out.push({ cat: 'stay', label: '\uD83C\uDFE8 Book accommodation' + (s.location ? ' \u2013 ' + s.location : ''), detail: s.location, done: s.booked,
       list: 'stays', id: s.id, field: 'booked', date: s.checkIn || start }));
-  j.tasks.forEach(t => out.push({ cat: 'after', label: t.label, detail: t.label, done: t.done, list: 'tasks', id: t.id, field: 'done', date: end }));
+  j.tasks.forEach(t => out.push({ cat: 'after', label: taskDisplayLabel(t.label), detail: t.label, done: t.done, list: 'tasks', id: t.id, field: 'done', date: end }));
   return out;
 }
 function todoItems() {
@@ -436,7 +443,7 @@ function todoItems() {
   return out.sort((a, b) => key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : order(a) - order(b));
 }
 function todoRow(t, byTask) {
-  const main = byTask ? (t.detail || 'Details to be added') : t.label;
+  const main = t.cat === 'after' ? t.label : (byTask ? taskDisplayLabel(t.detail || 'Details to be added') : t.label);
   let sub = esc(jobTitle(t.job)) + (byTask && t.date ? ' \u00b7 ' + fmtDate(t.date) : '');
   if (t.cat === 'checkin') sub += '<br><span class="fpstat">' + (t.when ? 'Departs ' + esc(fmtDT(t.when)) : 'Add the departure time to get reminders') + '</span>';
   if ((t.cat === 'plan' || t.cat === 'gar') && t.leg) { const s = legStatus(t.leg, t.cat === 'gar' ? 'gar' : 'fp'); sub += '<br><span class="fpstat ' + s.level + '">' + esc(s.text) + '</span>'; }
@@ -667,7 +674,7 @@ function stayHTML(s) {
   const open = UI.open.has(s.id);
   return '<div class="item ' + (s.booked ? 'done' : '') + '" data-list="stays" data-id="' + s.id + '">' +
     '<div class="item-h"><input type="checkbox" data-f="booked" aria-label="Booked" ' + (s.booked ? 'checked' : '') + '>' +
-    '<button class="item-t" data-act="toggle" data-id="' + s.id + '"><b>Accommodation</b>' +
+    '<button class="item-t" data-act="toggle" data-id="' + s.id + '"><b>\uD83C\uDFE8 Accommodation</b>' +
     '<span class="sum" data-sum>' + esc(itemSummary('stays', s)) + '</span></button>' +
     '<button class="icon sm" data-act="del" aria-label="Remove">\u2715</button></div>' +
     (open ? '<div class="item-b">' + fld('Location / hotel', 'data-f="location" placeholder="e.g. Nice"', s.location) +
@@ -704,7 +711,7 @@ function legHTML(l, i) {
 function taskHTML(t) {
   return '<div class="item ' + (t.done ? 'done' : '') + '" data-list="tasks" data-id="' + t.id + '">' +
     '<div class="item-h"><input type="checkbox" data-f="done" ' + (t.done ? 'checked' : '') + '>' +
-    '<div class="item-t static"><b>' + esc(t.label) + '</b></div>' +
+    '<div class="item-t static"><b>' + esc(taskDisplayLabel(t.label)) + '</b></div>' +
     '<button class="icon sm" data-act="del" aria-label="Remove">\u2715</button></div></div>';
 }
 function section(title, items, hint, addAct, addLabel) {
@@ -720,7 +727,7 @@ function checklistHTML(j) {
     '<section class="sect"><h3>2 \u00B7 Outbound / return travel</h3>' +
       '<h4 class="sub">Outbound</h4>' + (j.flights.filter(f => f.dir === 'out').map(flightHTML).join('') || '<p class="small">No outbound travel to book.</p>') + '<button class="btn" data-act="add-out">+ Add outbound travel</button>' +
       '<h4 class="sub">Return</h4>' + (j.flights.filter(f => f.dir === 'return').map(flightHTML).join('') || '<p class="small">No return travel to book.</p>') + '<button class="btn" data-act="add-ret">+ Add return travel</button></section>' +
-    section('3 \u00B7 Accommodation', j.stays.map(stayHTML).join(''), 'No accommodation to book.', 'add-stay', '+ Add accommodation (another location or night)') +
+    section('3 \u00B7 \uD83C\uDFE8 Accommodation', j.stays.map(stayHTML).join(''), 'No accommodation to book.', 'add-stay', '+ Add accommodation (another location or night)') +
     '<section class="sect"><h3>4 \u00B7 Post-flight tasks</h3>' + j.tasks.map(taskHTML).join('') +
       '<div class="addtask"><input id="newTask" placeholder="Add your own task" autocomplete="off"><button class="btn" data-act="add-task">Add</button></div></section>';
 }
