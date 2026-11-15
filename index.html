@@ -97,6 +97,16 @@ body.busy .btn,body.busy .icon{pointer-events:none;opacity:.6}
 .item-sub select{font:inherit;padding:.3rem .4rem;border-radius:8px;border:1px solid var(--line);background:var(--card);color:inherit;margin-left:.3rem}
 .modeicon{font-size:1.4rem;width:1.8rem;text-align:center}
 .tabs.sub{margin:12px 0 0}
+.garbox{border:1px dashed var(--line);border-radius:12px;padding:12px;margin:10px 0}
+.peopleblock{margin:10px 0}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
+.pchip{display:inline-flex;align-items:center;gap:2px;padding:2px 4px 2px 10px;border-radius:999px;border:1px solid var(--line);background:var(--card)}
+.pchip.bad{border-color:var(--danger);color:var(--danger)}
+.icon.xs{padding:2px 8px;min-width:0;font-size:.9rem}
+.peopleblock select{font:inherit;padding:.4rem;border-radius:8px;border:1px solid var(--line);background:var(--card);color:inherit;max-width:100%}
+button.card.plain{display:block;width:100%;text-align:left;font:inherit;color:inherit;cursor:pointer;margin:8px 0}
+.btn[aria-disabled=true]{opacity:.6}
+.btn.block+.btn.block{margin-top:8px}
 .tabs.sub .tab{padding:7px;font-size:.9rem}
 .todo{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:6px 12px;margin:8px 0}
 .todo.done{opacity:.5}
@@ -369,7 +379,7 @@ const cmp = (a, b) => sortKey(a) < sortKey(b) ? -1 : sortKey(a) > sortKey(b) ? 1
 // ---------- state ----------
 const S = { active: [], archive: [], appUrl: '', calendarName: 'Pilot Jobs', reminders: [1440, 240, 120],
             colours: { tentative: 'orange', confirmed: 'green' },
-            tab: 'active', todoSort: 'date', openId: null, draft: null, needConnect: false, connectError: '', cxUrl: null, loaded: false, error: '', opened: false, imp: null };
+            tab: 'active', todoSort: 'date', openId: null, draft: null, needConnect: false, connectError: '', cxUrl: null, loaded: false, error: '', opened: false, imp: null, dir: { people: [], aircraft: [], garSettings: { contact: '', address: '' }, loaded: false, loading: false, error: '' }, dirView: 'people', dirEdit: null };
 const UI = { open: new Set() };
 const saving = {};
 let chip = '';
@@ -378,13 +388,6 @@ const findJob = id => id === 'draft' ? S.draft : (S.active.find(j => j.id === id
 const isArchived = j => S.archive.indexOf(j) >= 0;
 
 // ---------- checklist model ----------
-// Keep checkpoint icons centralised so they appear consistently throughout the app.
-function taskDisplayLabel(label) {
-  const value = String(label || '');
-  if (/invoice/i.test(value)) return '\uD83E\uDDFE ' + value;
-  if (/expense|receipt/i.test(value)) return '\uD83D\uDCB7 ' + value;
-  return value;
-}
 const legName = l => l.route ? ' (' + l.route + ')' : '';
 // How the pilot gets to / from the job. "car" = driving himself: nothing to book, no calendar event.
 const MODES = [['flight', 'Flight'], ['train', 'Train'], ['car', 'Driving'], ['other', 'Other (bus, ferry\u2026)']];
@@ -401,7 +404,7 @@ function driveEnd(f) {
 const fixTravel = f => { f.mode = travelMode(f); f.commercial = f.mode === 'flight'; return f; };
 const CATS = [['gar', 'Submit GARs'], ['plan', 'File flight plans'], ['handling', 'Handling, fuel & permits'], ['wx', 'Weather & NOTAM briefings'],
   ['out', 'Book outbound travel'], ['ret', 'Book return travel'], ['checkin', 'Check in for flights'],
-  ['stay', '\uD83C\uDFE8 Book accommodation'], ['after', 'Post-flight tasks']];
+  ['stay', 'Book accommodation'], ['after', 'Post-flight tasks']];
 function allChecks(j) {
   const out = [];
   j.flights.forEach(fixTravel);
@@ -429,9 +432,9 @@ function allChecks(j) {
     out.push({ cat: 'checkin', label: 'Check in for ' + (dir === 'out' ? 'outbound' : 'return') + ' flight' + (f.route ? ' (' + f.route + ')' : ''),
       detail: f.route, done: f.checkedIn, list: 'flights', id: f.id, field: 'checkedIn', date: day(f.depart) || (dir === 'out' ? start : end), when: f.depart })));
   j.stays.forEach(s =>
-    out.push({ cat: 'stay', label: '\uD83C\uDFE8 Book accommodation' + (s.location ? ' \u2013 ' + s.location : ''), detail: s.location, done: s.booked,
+    out.push({ cat: 'stay', label: 'Book accommodation' + (s.location ? ' \u2013 ' + s.location : ''), detail: s.location, done: s.booked,
       list: 'stays', id: s.id, field: 'booked', date: s.checkIn || start }));
-  j.tasks.forEach(t => out.push({ cat: 'after', label: taskDisplayLabel(t.label), detail: t.label, done: t.done, list: 'tasks', id: t.id, field: 'done', date: end }));
+  j.tasks.forEach(t => out.push({ cat: 'after', label: t.label, detail: t.label, done: t.done, list: 'tasks', id: t.id, field: 'done', date: end }));
   return out;
 }
 function todoItems() {
@@ -443,7 +446,7 @@ function todoItems() {
   return out.sort((a, b) => key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : order(a) - order(b));
 }
 function todoRow(t, byTask) {
-  const main = t.cat === 'after' ? t.label : (byTask ? taskDisplayLabel(t.detail || 'Details to be added') : t.label);
+  const main = byTask ? (t.detail || 'Details to be added') : t.label;
   let sub = esc(jobTitle(t.job)) + (byTask && t.date ? ' \u00b7 ' + fmtDate(t.date) : '');
   if (t.cat === 'checkin') sub += '<br><span class="fpstat">' + (t.when ? 'Departs ' + esc(fmtDT(t.when)) : 'Add the departure time to get reminders') + '</span>';
   if ((t.cat === 'plan' || t.cat === 'gar') && t.leg) { const s = legStatus(t.leg, t.cat === 'gar' ? 'gar' : 'fp'); sub += '<br><span class="fpstat ' + s.level + '">' + esc(s.text) + '</span>'; }
@@ -641,7 +644,7 @@ function renderList(app) {
     '<div class="tab ' + (S.tab === 'todo' ? 'on' : '') + '" data-act="tab" data-tab="todo">To do (' + todoCount + ')</div>' +
     '<div class="tab ' + (S.tab === 'archive' ? 'on' : '') + '" data-act="tab" data-tab="archive">Archive (' + arch.length + ')</div></nav>' +
     '<main>' + (S.tab === 'archive' ? '' : alertBanner()) + body +
-    (S.tab === 'active' ? '<p class="foot"><button class="linkbtn" data-act="import-open">Import jobs from a spreadsheet</button></p>' : '') + '</main>' +
+    (S.tab === 'active' ? '<p class="foot"><button class="linkbtn" data-act="dir-open">People &amp; aircraft</button> \u00B7 <button class="linkbtn" data-act="import-open">Import jobs from a spreadsheet</button></p>' : '') + '</main>' +
     (window.PILOT_MOCK ? '' : '<p class="foot"><button class="linkbtn" data-act="disconnect">Disconnect this device</button></p>');
 }
 
@@ -652,13 +655,11 @@ const fld = (label, attrs, val, type) =>
 function flightHTML(f) {
   fixTravel(f);
   const open = UI.open.has(f.id), car = f.mode === 'car';
-  const modeIcon = { flight: '\u2708\uFE0F', train: '\uD83D\uDE86', car: '\uD83D\uDE97' }[f.mode] || '';
   const what = { flight: 'flight', train: 'train', car: '\u2013 driving', other: 'travel' }[f.mode] || 'flight';
   const numLabel = { flight: 'Flight no.', train: 'Train / service', other: 'Service / number' }[f.mode];
   const modeSel = '<label class="inline">Travel by <select data-f="mode" aria-label="Travel by">' + MODES.map(m => '<option value="' + m[0] + '"' + (f.mode === m[0] ? ' selected' : '') + '>' + m[1] + '</option>').join('') + '</select></label>';
   return '<div class="item ' + (isDone('flights', f) ? 'done' : '') + '" data-list="flights" data-id="' + f.id + '">' +
-    '<div class="item-h">' + (modeIcon ? '<span class="modeicon" aria-hidden="true">' + modeIcon + '</span>' : '') +
-    (car ? '' : '<input type="checkbox" data-f="booked" aria-label="Booked" ' + (f.booked ? 'checked' : '') + '>') +
+    '<div class="item-h">' + (car ? '<span class="modeicon" aria-hidden="true">\uD83D\uDE97</span>' : '<input type="checkbox" data-f="booked" aria-label="Booked" ' + (f.booked ? 'checked' : '') + '>') +
     '<button class="item-t" data-act="toggle" data-id="' + f.id + '"><b>' + (f.dir === 'out' ? 'Outbound' : 'Return') + ' ' + what + '</b>' +
     '<span class="sum" data-sum>' + esc(itemSummary('flights', f)) + '</span></button>' +
     '<button class="icon sm" data-act="del" aria-label="Remove">\u2715</button></div>' +
@@ -674,7 +675,7 @@ function stayHTML(s) {
   const open = UI.open.has(s.id);
   return '<div class="item ' + (s.booked ? 'done' : '') + '" data-list="stays" data-id="' + s.id + '">' +
     '<div class="item-h"><input type="checkbox" data-f="booked" aria-label="Booked" ' + (s.booked ? 'checked' : '') + '>' +
-    '<button class="item-t" data-act="toggle" data-id="' + s.id + '"><b>\uD83C\uDFE8 Accommodation</b>' +
+    '<button class="item-t" data-act="toggle" data-id="' + s.id + '"><b>Accommodation</b>' +
     '<span class="sum" data-sum>' + esc(itemSummary('stays', s)) + '</span></button>' +
     '<button class="icon sm" data-act="del" aria-label="Remove">\u2715</button></div>' +
     (open ? '<div class="item-b">' + fld('Location / hotel', 'data-f="location" placeholder="e.g. Nice"', s.location) +
@@ -696,6 +697,7 @@ function legHTML(l, i) {
     '<label class="fld"><span>Destination country (sets the GAR rule)</span><select data-f="dest">' +
       '<option value="">Choose\u2026</option>' + opt('UK', 'United Kingdom') + opt('FR', 'France') + opt('OTHER', 'Anywhere else') + '</select></label>' +
     '<p class="small" data-destnote>' + esc(destNote(l)) + '</p>' +
+    garBox(findJob(S.openId), l) +
     cb('gar', 'Submit GAR') +
     '<p class="small" data-garnote>' + esc(gr ? gr.note : '') + '</p>' +
     '<p class="fpstat ' + gs.level + '" data-gar>' + esc(gs.text) + '</p>' +
@@ -711,7 +713,7 @@ function legHTML(l, i) {
 function taskHTML(t) {
   return '<div class="item ' + (t.done ? 'done' : '') + '" data-list="tasks" data-id="' + t.id + '">' +
     '<div class="item-h"><input type="checkbox" data-f="done" ' + (t.done ? 'checked' : '') + '>' +
-    '<div class="item-t static"><b>' + esc(taskDisplayLabel(t.label)) + '</b></div>' +
+    '<div class="item-t static"><b>' + esc(t.label) + '</b></div>' +
     '<button class="icon sm" data-act="del" aria-label="Remove">\u2715</button></div></div>';
 }
 function section(title, items, hint, addAct, addLabel) {
@@ -727,7 +729,7 @@ function checklistHTML(j) {
     '<section class="sect"><h3>2 \u00B7 Outbound / return travel</h3>' +
       '<h4 class="sub">Outbound</h4>' + (j.flights.filter(f => f.dir === 'out').map(flightHTML).join('') || '<p class="small">No outbound travel to book.</p>') + '<button class="btn" data-act="add-out">+ Add outbound travel</button>' +
       '<h4 class="sub">Return</h4>' + (j.flights.filter(f => f.dir === 'return').map(flightHTML).join('') || '<p class="small">No return travel to book.</p>') + '<button class="btn" data-act="add-ret">+ Add return travel</button></section>' +
-    section('3 \u00B7 \uD83C\uDFE8 Accommodation', j.stays.map(stayHTML).join(''), 'No accommodation to book.', 'add-stay', '+ Add accommodation (another location or night)') +
+    section('3 \u00B7 Accommodation', j.stays.map(stayHTML).join(''), 'No accommodation to book.', 'add-stay', '+ Add accommodation (another location or night)') +
     '<section class="sect"><h3>4 \u00B7 Post-flight tasks</h3>' + j.tasks.map(taskHTML).join('') +
       '<div class="addtask"><input id="newTask" placeholder="Add your own task" autocomplete="off"><button class="btn" data-act="add-task">Add</button></div></section>';
 }
@@ -742,9 +744,11 @@ function renderDetail(app) {
   let actions;
   if (j.status === 'tentative') {
     actions = '<div class="actions"><button class="btn good" data-act="confirm">Confirm job</button>' +
+      '<button class="btn" data-act="duplicate">Duplicate as new job</button>' +
       '<button class="btn danger" data-act="cancel">Cancel job</button></div>';
   } else {
     actions = '<div class="actions"><button class="btn good" data-act="complete">Mark job complete</button>' +
+      '<button class="btn" data-act="duplicate">Duplicate as new job</button>' +
       '<button class="btn danger" data-act="cancel">Cancel job</button></div>';
   }
   app.innerHTML = head + '<main class="detail">' +
@@ -774,7 +778,7 @@ function seedDraft(j) {            // the starting checklist for a confirmed job
   j.flights = [newFlight('out'), newFlight('return')];
   j.stays = [{ id: uid(), location: '', checkIn: j.startDate, checkOut: j.endDate, ref: '', booked: false }];
   j.legs = [newLeg(j.startDate)];
-  j.tasks = [{ id: uid(), label: 'Send invoice', done: false }, { id: uid(), label: 'Log expenses and receipts', done: false }];
+  j.tasks = POST_FLIGHT_TASKS();
   UI.open.add(j.flights[0].id); UI.open.add(j.stays[0].id);
 }
 const draftDirty = j => ['title', 'notes', 'location', 'startDate', 'endDate', 'startTime', 'endTime'].some(k => j[k]);
@@ -804,7 +808,7 @@ function renderNew(app) {
       notes + checklistHTML(j);
   }
   app.innerHTML = '<header class="bar"><button class="btn ghost" data-act="back">← Cancel</button><b>New job</b></header>' +
-    '<main class="detail">' + tick + body +
+    '<main class="detail">' + (j.copyNote ? '<p class="fpstat info">' + esc(j.copyNote) + '</p>' : '') + tick + body +
     '<p class="small" id="newErr" style="color:var(--danger)"></p>' +
     '<div class="actions"><button class="btn ' + (conf ? 'good' : 'primary') + '" data-act="save-new">' + (conf ? 'Save confirmed job' : 'Save tentative job') + '</button></div>' +
     '<p class="small">' + (conf ? 'Goes on the calendar in green. Commercial flights with departure times get check-in reminders, and flight plan / GAR deadlines get their own events.'
@@ -819,7 +823,8 @@ function renderArchived(app, j) {
     '<p class="meta small">' + (dateRange(j) || 'No date') + (j.location ? ' \u00B7 ' + esc(j.location) : '') + '</p>' +
     (j.notes ? '<p style="white-space:pre-wrap">' + esc(j.notes) + '</p>' : '') +
     (checks.length ? '<h3>Checklist when archived</h3>' + checks.map(c => '<div class="inline">' + (c.done ? '\u2705' : '\u2B1C') + ' ' + esc(c.label) + '</div>').join('') : '') +
-    '<div class="actions"><button class="btn primary" data-act="restore">Restore job</button></div>' +
+    '<div class="actions"><button class="btn primary" data-act="duplicate">Duplicate as new job</button><button class="btn" data-act="restore">Restore job</button></div>' +
+    '<p class="small">Duplicate copies the job as a starting point for a new one (a regular flight, say): dates move forward by whole weeks so the weekday stays the same, and nothing is ticked off.</p>' +
     '<p class="small">Restoring ' + (j.status === 'cancelled' ? 'puts the job back on the calendar.' : 'moves it back to Confirmed.') + '</p></main>';
 }
 
@@ -846,7 +851,7 @@ function render() {
       : '<div class="empty">Loading\u2026</div>';
     return;
   }
-  if (S.openId === 'import') renderImport(app); else if (S.openId === 'draft') renderNew(app); else if (S.openId) renderDetail(app); else renderList(app);
+  if (S.openId === 'dir') renderDir(app); else if (S.openId === 'import') renderImport(app); else if (S.openId === 'draft') renderNew(app); else if (S.openId) renderDetail(app); else renderList(app);
   window.scrollTo(0, y);
 }
 
@@ -894,6 +899,7 @@ function onField(e) {
           const sel = itemEl.querySelector('[data-f=dest]'); if (sel) sel.value = it.dest;
         }
       } else if (f === 'dest') it.destManual = true;
+      else if (f === 'aircraftId') { scheduleSave(j.id, 250); refreshDerived(j); render(); return; }
       const dn = itemEl.querySelector('[data-destnote]'); if (dn) dn.textContent = destNote(it);
     }
   } else {
@@ -927,6 +933,8 @@ function addItem(list, item) {
   scheduleSave(j.id, 100);
   render();
 }
+// the standard post-flight tasks, in order (backend seedChecklist_ has the same list)
+const POST_FLIGHT_TASKS = () => ['Send invoice', 'Invoice paid', 'Log expenses and receipts', 'Expenses paid'].map(label => ({ id: uid(), label: label, done: false }));
 const newFlight = dir => ({ id: uid(), dir, route: '', flightNo: '', depart: '', arrive: '', ref: '', booked: false, checkedIn: false, driveTime: '', mode: 'flight', commercial: true, eventId: '', sig: '' });
 
 function moveToArchive(j) {
@@ -941,8 +949,30 @@ function replaceActive(job) {
 }
 
 const actions = {
+  'duplicate'() { const j = findJob(S.openId); if (!j) return; S.draft = dupJob(j); S.openId = 'draft'; window.scrollTo(0, 0); render(); },
   'new'() { S.draft = newDraft(); S.openId = 'draft'; window.scrollTo(0, 0); render(); },
   'save-new'() { saveDraft(); },
+  'dir-open'() { S.openId = 'dir'; S.dirEdit = null; window.scrollTo(0, 0); render(); },
+  'dir-close'() { S.openId = null; S.dirEdit = null; render(); },
+  'dir-tab'(t) { S.dirView = t.dataset.view; S.dirEdit = null; render(); },
+  'dir-retry'() { S.dir.error = ''; S.dir.loaded = false; ensureDir(); render(); },
+  'dir-new'(t) { S.dirEdit = { kind: t.dataset.kind, rec: t.dataset.kind === 'person' ? { role: S.dir.people.some(p => p.role === 'crew') ? 'passenger' : 'crew' } : {} }; render(); },
+  'dir-edit'(t) { const list = t.dataset.kind === 'person' ? S.dir.people : S.dir.aircraft; S.dirEdit = { kind: t.dataset.kind, rec: JSON.parse(JSON.stringify(list.find(x => x.id === t.dataset.id))) }; render(); },
+  'dir-cancel'() { S.dirEdit = null; render(); },
+  'dir-save'(t) { dirSave(t.dataset.kind); },
+  'dir-delete'(t) {
+    if (!window.confirm('Delete this ' + (t.dataset.kind === 'person' ? 'person' : 'aircraft') + '? This can\u2019t be undone.')) return;
+    busy(() => api(t.dataset.kind === 'person' ? 'deletePerson' : 'deleteAircraft', t.dataset.id)).then(() => {
+      if (t.dataset.kind === 'person') S.dir.people = S.dir.people.filter(p => p.id !== t.dataset.id); else S.dir.aircraft = S.dir.aircraft.filter(a => a.id !== t.dataset.id);
+      S.dirEdit = null; render();
+    }).catch(e => toast(e.message || String(e), 'err'));
+  },
+  'dir-save-settings'() { busy(() => api('saveGarSettings', { contact: val('gsContact'), address: val('gsAddress') })).then(s => { S.dir.garSettings = s; toast('Saved', ''); }).catch(e => toast(e.message || String(e), 'err')); },
+  'person-del'(t) {
+    const j = findJob(S.openId), l = j && j.legs.find(x => x.id === t.closest('[data-list]').dataset.id); if (!l) return;
+    l[t.dataset.key] = (l[t.dataset.key] || []).filter(id => id !== t.dataset.pid); scheduleSave(j.id, 250); render();
+  },
+  'make-gar'(t) { const j = findJob(S.openId), l = j && j.legs.find(x => x.id === t.dataset.id); if (l) downloadGar(j, l); },
   'import-open'() { S.imp = null; S.openId = 'import'; window.scrollTo(0, 0); render(); },
   'import-close'() { S.imp = null; S.openId = null; render(); },
   'import-pick'() { $('#impFile').click(); },
@@ -1082,6 +1112,280 @@ document.addEventListener('change', e => {
   render();
 });
 
+// ---------- GAR file: fill in the Home Office template ----------
+// The official .xlsx has dropdowns, formats and rules that must stay exactly as they are, so instead of rebuilding it
+// we open the file (an .xlsx is a zip of XML files) and only write values into the empty input cells.
+const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+const GAR_TEMPLATE_URL = 'GAR_Template.xlsx';
+const COUNTRY_LIST = 'AFG:Afghanistan|AGO:Angola|ALB:Albania|AND:Andorra|ARE:United Arab Emirates|ARG:Argentina|ARM:Armenia|ATG:Antigua and Barbuda|AUS:Australia|AUT:Austria|AZE:Azerbaijan|BDI:Burundi|BDT:British Dependent Territories Citizen|BEL:Belgium|BEN:Benin|BFA:Burkina Faso|BGD:Bangladesh|BGR:Bulgaria|BHR:Bahrain|BHS:The Bahamas|BIH:Bosnia and Herzegovina|BLR:Belarus|BLZ:Belize|BOL:Bolivia|BRA:Brazil|BRB:Barbados|BRN:Brunei|BTN:Bhutan|BWA:Botswana|CAF:Central African Republic|CAN:Canada|CHE:Switzerland|CHL:Chile|CHN:China|CIV:Ivory Coast|CMR:Cameroon|COD:Congo (Democratic Republic)|COG:Congo|COL:Colombia|COM:Comoros|CPV:Cape Verde|CRI:Costa Rica|CUB:Cuba|CYP:Cyprus|CZE:Czechia|DEU:Germany|DJI:Djibouti|DMA:Dominica|DNK:Denmark|DOM:Dominican Republic|DZA:Algeria|ECU:Ecuador|EGY:Egypt|ERI:Eritrea|ESP:Spain|EST:Estonia|ETH:Ethiopia|FIN:Finland|FJI:Fiji|FRA:France|FSM:Federated States of Micronesia|GAB:Gabon|GBD:British Overseas Territories Citizen|GBN:British National (overseas)|GBO:British Overseas Citizen|GBP:British Protected Person|GBR:United Kingdom|GBS:British Subject|GEO:Georgia|GHA:Ghana|GIN:Guinea|GMB:The Gambia|GNB:Guinea-Bissau|GNQ:Equatorial Guinea|GRC:Greece|GRD:Grenada|GTM:Guatemala|GUY:Guyana|HKG:Hong Kong  Special Administrative Region of China|HND:Honduras|HRV:Croatia|HTI:Haiti|HUN:Hungary|IDN:Indonesia|IND:India|IOT:British Indian Ocean Territory|IRL:Ireland|IRN:Iran|IRQ:Iraq|ISL:Iceland|ISR:Israel|ITA:Italy|JAM:Jamaica|JOR:Jordan|JPN:Japan|KAZ:Kazakhstan|KEN:Kenya|KGZ:Kyrgyzstan|KHM:Cambodia|KIR:Kiribati|KNA:Saint Kitts and Nevis|KOR:Republic of  South Korea|KWT:Kuwait|LAO:Laos|LBN:Lebanon|LBR:Liberia|LBY:Libya|LCA:Saint Lucia|LIE:Liechtenstein|LKA:Sri Lanka|LSO:Lesotho|LTU:Lithuania|LUX:Luxembourg|LVA:Latvia|MAC:Macao  Special Administrative Region of China|MAR:Morocco|MCO:Monaco|MDA:Moldova|MDG:Madagascar|MDV:Maldives|MEX:Mexico|MHL:Marshall Islands|MKD:North Macedonia|MLI:Mali|MLT:Malta|MMR:Myanmar (Burma)|MNE:Montenegro|MNG:Mongolia|MOZ:Mozambique|MRT:Mauritania|MUS:Mauritius|MWI:Malawi|MYS:Malaysia|NAM:Namibia|NER:Niger|NGA:Nigeria|NIC:Nicaragua|NLD:Netherlands|NOR:Norway|NPL:Nepal|NRU:Nauru|NZL:New Zealand|OMN:Oman|PAK:Pakistan|PAN:Panama|PER:Peru|PHL:Philippines|PLW:Palau|PNG:Papua New Guinea|POL:Poland|PRK:North Korea, Democratic People\'s Republic|PRT:Portugal|PRY:Paraguay|PSE:Palestinian Authority|QAT:Qatar|RKS:Kosovo|ROU:Romania|RUS:Russia|RWA:Rwanda|SAU:Saudi Arabia|SDN:Sudan|SEN:Senegal|SGP:Singapore|SLB:Solomon Islands|SLE:Sierra Leone|SLV:El Salvador|SMR:San Marino|SOM:Somalia|SRB:Serbia|SSD:South Sudan|STP:Sao Tome and  Principe|SUR:Suriname|SVK:Slovakia|SVN:Slovenia|SWE:Sweden|SWZ:Eswatini|SYC:Seychelles|SYR:Syria|TCD:Chad|TGO:Togo|THA:Thailand|TJK:Tajikistan|TKM:Turkmenistan|TLS:Timor-Leste|TON:Tonga|TTO:Trinidad and Tobago|TUN:Tunisia|TUR:Turkey|TUV:Tuvalu|TWN:Taiwan|TZA:Tanzania|UGA:Uganda|UKR:Ukraine|UNO:United Nations|URY:Uruguay|USA:United States|UZB:Uzbekistan|VAT:Vatican City|VCT:Saint Vincent and the Grenadines|VEN:Venezuela|VNM:Vietnam|VUT:Vanuatu|WSM:Samoa|XXA:Stateless as defined in Article 1 of the 1954 Convention|XXB:Refugee as defined in Article 1 of the 1951 Convention Relating to the Status of Refugees as amended by the 1967 Protocol|XXC:Refugee other than as defined above|XXX:Person of unspecified nationality|YEM:Yemen|ZAF:South Africa|ZMB:Zambia|ZWE:Zimbabwe'.split('|').map(s => s.split(':'));
+// The form refuses accents, hyphens and other special characters in names.
+const garText = (s, max) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[‐-―-]/g, ' ').replace(/[^A-Za-z0-9 ]/g, '').replace(/\s+/g, ' ').trim().slice(0, max || 35);
+const excelDate = iso => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || ''); return m ? (Date.UTC(+m[1], m[2] - 1, +m[3]) - Date.UTC(1899, 11, 30)) / 864e5 : ''; };
+const excelTime = hm => { const m = /^(\d{2}):(\d{2})/.exec(hm || ''); return m ? (+m[1] * 60 + +m[2]) / 1440 : ''; };
+const xmlEsc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const addDaysISO = (iso, n) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || ''); return m ? new Date(Date.UTC(+m[1], m[2] - 1, +m[3] + n)).toISOString().slice(0, 10) : ''; };
+
+// What the GAR needs for one leg, plus a list of what is missing. `dir` is the directory (people, aircraft, garSettings).
+function garData(job, leg, dir) {
+  const missing = [], warn = [];
+  const from = (leg.from || '').toUpperCase(), to = (leg.to || '').toUpperCase();
+  const ac = (dir.aircraft || []).find(a => a.id === leg.aircraftId);
+  const byId = id => (dir.people || []).find(p => p.id === id);
+  let crew = (leg.crewIds || []).map(byId).filter(Boolean);
+  if (!crew.length) crew = (dir.people || []).filter(p => p.role === 'crew').slice(0, 1);       // default: the pilot
+  const pax = (leg.paxIds || []).map(byId).filter(Boolean);
+  const ukFrom = icaoCountry(from) === 'UK', ukTo = icaoCountry(to) === 'UK';
+  if (!/^[A-Z]{4}$/.test(from) || !/^[A-Z]{4}$/.test(to)) missing.push('From and To airports');
+  else if (ukFrom && ukTo) missing.push('this leg is within the UK, which needs no GAR');
+  else if (!ukFrom && !ukTo) missing.push('a UK airport at one end (EG…), because this form is for flights to or from the UK');
+  if (!leg.date) missing.push('departure date');
+  if (!leg.time) missing.push('departure time (UTC)');
+  if (!leg.arrive) missing.push('arrival time (UTC)');
+  if (!ac) missing.push('aircraft');
+  if (!crew.length) missing.push('at least one crew member');
+  if (crew.length > 8) missing.push('no more than 8 crew');
+  if (pax.length > 20) missing.push('no more than 20 passengers');
+  [...crew, ...pax].forEach(p => {
+    const need = [!p.surname && 'surname', !p.dob && 'date of birth', !p.nationality && 'nationality', !p.tdCountry && 'issuing country', !p.tdNumber && 'document number', !p.tdExpiry && 'expiry date'].filter(Boolean);
+    if (need.length) missing.push(garText(p.forenames + ' ' + p.surname, 60) + ': ' + need.join(', '));
+    if (p.tdExpiry && leg.date && p.tdExpiry < leg.date) warn.push(garText(p.forenames + ' ' + p.surname, 60) + '’s travel document expires before this flight.');
+  });
+  if (!(dir.garSettings && dir.garSettings.contact)) warn.push('No responsible-person contact set (People & aircraft → GAR details).');
+  const arrDate = leg.date && leg.arrive && leg.time ? (leg.arrive < leg.time ? addDaysISO(leg.date, 1) : leg.date) : leg.date;
+  return { missing, warn, crew, pax, data: {
+    direction: ukTo ? 'Arrival' : 'Departure', arrPort: to, arrDate, arrTime: leg.arrive, depPort: from, depDate: leg.date, depTime: leg.time,
+    owner: ac ? ac.owner : '', contact: (dir.garSettings || {}).contact || '', reg: ac ? ac.reg : '', type: ac ? ac.type : '', base: ac ? ac.base : '',
+    reason: ac ? ac.reason : 'Short Term Visit', address: (dir.garSettings || {}).address || '', captain: crew[0] ? garText(crew[0].surname, 35) : '' } };
+}
+
+// Writes the values into the template's own XML so every rule, dropdown and format is kept as the Home Office made it.
+async function fillGarXlsx(templateBuf, g, JSZipLib) {
+  const zip = await (JSZipLib || window.JSZip).loadAsync(templateBuf);
+  const wbXml = await zip.file('xl/workbook.xml').async('string');
+  const rels = await zip.file('xl/_rels/workbook.xml.rels').async('string');
+  const rid = (/<sheet [^>]*name="GAR"[^>]*r:id="([^"]+)"/.exec(wbXml) || /<sheet [^>]*r:id="([^"]+)"[^>]*name="GAR"/.exec(wbXml) || [])[1];
+  const target = rid && (new RegExp('<Relationship [^>]*Id="' + rid + '"[^>]*Target="([^"]+)"').exec(rels) || new RegExp('<Relationship [^>]*Target="([^"]+)"[^>]*Id="' + rid + '"').exec(rels) || [])[1];
+  if (!target) throw new Error('This doesn’t look like the GAR template (no sheet called GAR).');
+  const sheetPath = 'xl/' + target.replace(/^\/?(xl\/)?/, '');
+  let sheet = await zip.file(sheetPath).async('string');
+  let sst = await zip.file('xl/sharedStrings.xml').async('string');
+  let nSi = (sst.match(/<si[ >]/g) || []).length, added = 0, uses = 0;
+  const newStrings = [];
+  const strIndex = v => { uses++; const i = newStrings.indexOf(v); if (i >= 0) return nSi + i; newStrings.push(v); added++; return nSi + newStrings.length - 1; };
+  const setCell = (ref, kind, val) => {
+    const re = new RegExp('<c r="' + ref + '"([^>]*?)(/>|>[\\s\\S]*?</c>)');
+    const m = re.exec(sheet); if (!m) throw new Error('The GAR template has changed: cell ' + ref + ' was not found.');
+    const attrs = m[1].replace(/\s+t="[^"]*"/, '');
+    const nc = val === '' || val == null ? '<c r="' + ref + '"' + attrs + '/>'
+      : kind === 'n' ? '<c r="' + ref + '"' + attrs + '><v>' + val + '</v></c>' : '<c r="' + ref + '"' + attrs + ' t="s"><v>' + strIndex(String(val)) + '</v></c>';
+    sheet = sheet.replace(re, () => nc);
+  };
+  const d = g.data;
+  const S = (r, v) => setCell(r, 's', v), N = (r, v) => setCell(r, 'n', v);
+  S('B2', d.direction);
+  S('B3', d.arrPort); N('D3', excelDate(d.arrDate)); N('F3', excelTime(d.arrTime)); S('H3', garText(d.owner, 70)); S('J3', String(d.contact).slice(0, 70));
+  S('B4', d.depPort); N('D4', excelDate(d.depDate)); N('F4', excelTime(d.depTime));
+  S('B5', String(d.reg).toUpperCase().replace(/[^A-Z0-9]/g, '')); S('D5', garText(d.type, 60)); S('F5', d.captain); S('H5', d.base);
+  S('B6', d.reason); S('D6', String(d.address).replace(/\s+/g, ' ').trim());
+  const person = (row, p) => {
+    S('A' + row, p.tdType || 'Passport'); S('B' + row, p.tdType === 'Other' ? garText(p.tdOther, 40) : ''); S('C' + row, p.tdCountry);
+    S('D' + row, String(p.tdNumber || '').replace(/\s+/g, '').toUpperCase());
+    S('E' + row, garText(p.surname, 35)); S('F' + row, garText(p.forenames, 35) || 'UNKNOWN'); S('G' + row, p.sex || 'Unspecified');
+    N('H' + row, excelDate(p.dob)); S('I' + row, garText(p.pob, 60)); S('J' + row, p.nationality); N('K' + row, excelDate(p.tdExpiry));
+    S('L' + row, String(p.address || '').replace(/\s+/g, ' ').trim());
+  };
+  g.crew.forEach((p, i) => person(9 + i, p));
+  g.pax.forEach((p, i) => person(20 + i, p));
+  // the two COUNTA totals are formulas: keep them, but refresh the stored result and ask Excel to recalculate on opening
+  sheet = sheet.replace(/(<c r="B17"[^>]*>\s*<f>[^<]*<\/f>\s*<v>)[^<]*(<\/v>)/, '$1' + g.crew.length + '$2').replace(/(<c r="B40"[^>]*>\s*<f>[^<]*<\/f>\s*<v>)[^<]*(<\/v>)/, '$1' + g.pax.length + '$2');
+  zip.file(sheetPath, sheet);
+  const total = +(/<sst [^>]*count="(\d+)"/.exec(sst) || [0, 0])[1], uniq = +(/<sst [^>]*uniqueCount="(\d+)"/.exec(sst) || [0, 0])[1];
+  sst = sst.replace(/count="\d+"/, 'count="' + (total + uses) + '"').replace(/uniqueCount="\d+"/, 'uniqueCount="' + (uniq + added) + '"')
+    .replace('</sst>', newStrings.map(v => '<si><t xml:space="preserve">' + xmlEsc(v) + '</t></si>').join('') + '</sst>');
+  zip.file('xl/sharedStrings.xml', sst);
+  zip.file('xl/workbook.xml', wbXml.replace(/<calcPr([^>]*?)\/>/, (m0, a) => /fullCalcOnLoad/.test(a) ? m0 : '<calcPr' + a + ' fullCalcOnLoad="1"/>'));
+  return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
+const loadLib = (url, name) => window[name] ? Promise.resolve() : new Promise((ok, fail) => {
+  const s = document.createElement('script'); s.src = url; s.onload = ok; s.onerror = () => fail(new Error('Couldn’t load a helper library – check your connection and try again.')); document.head.appendChild(s);
+});
+async function downloadGar(job, leg) {
+  const g = garData(job, leg, S.dir);
+  if (g.missing.length) { toast('Not ready: ' + g.missing[0] + (g.missing.length > 1 ? ' (+' + (g.missing.length - 1) + ' more)' : ''), 'err'); return; }
+  await busy(async () => {
+    try {
+      await loadLib(JSZIP_URL, 'JSZip');
+      const r = await fetch(GAR_TEMPLATE_URL); if (!r.ok) throw new Error('The GAR template file (' + GAR_TEMPLATE_URL + ') isn’t on this site yet – upload it next to index.html.');
+      const bytes = await fillGarXlsx(await r.arrayBuffer(), g);
+      const blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+      a.download = 'GAR_' + (g.data.reg || 'aircraft') + '_' + g.data.depPort + '-' + g.data.arrPort + '_' + g.data.depDate + '.xlsx';
+      document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+      toast(g.warn.length ? 'GAR file created. Check: ' + g.warn[0] : 'GAR file created – check it, then submit it as you normally do', g.warn.length ? 'err' : '');
+    } catch (e) { toast(e.message || String(e), 'err'); }
+  });
+}
+// ---------- duplicate a job as the start of a new one ----------
+// Dates move forward by whole weeks (so a Friday job stays a Friday) until the job starts after today. Nothing is carried over as done.
+const isoShift = (v, days) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})(.*)$/.exec(v || '');
+  return m ? new Date(Date.UTC(+m[1], m[2] - 1, +m[3] + days)).toISOString().slice(0, 10) + m[4] : '';
+};
+function dupJob(src) {
+  const today = new Date().toISOString().slice(0, 10);
+  let weeks = 0;
+  if (src.startDate && src.startDate <= today) {
+    const diff = Math.round((Date.parse(today) - Date.parse(src.startDate)) / 864e5);
+    weeks = Math.floor(diff / 7) + 1;                 // first same-weekday after today
+  }
+  const sh = v => weeks ? isoShift(v, weeks * 7) : (v || '');
+  const d = newDraft();
+  const had = src.status === 'confirmed' || src.status === 'completed' || src.prevStatus === 'confirmed';
+  Object.assign(d, { title: src.title || '', notes: src.notes || '', location: src.location || '', startTime: src.startTime || '', endTime: src.endTime || '',
+    startDate: sh(src.startDate), endDate: sh(src.endDate), status: had ? 'confirmed' : 'tentative', seeded: had });
+  if (had) {
+    d.flights = (src.flights || []).map(f => Object.assign({}, f, { id: uid(), depart: sh(f.depart), arrive: sh(f.arrive), booked: false, checkedIn: false, ref: '', eventId: '', sig: '' }));
+    d.stays = (src.stays || []).map(s => Object.assign({}, s, { id: uid(), checkIn: sh(s.checkIn), checkOut: sh(s.checkOut), ref: '', booked: false }));
+    d.legs = (src.legs || []).map(l => Object.assign({}, l, { id: uid(), date: sh(l.date), gar: false, plan: false, handling: false, wx: false,
+      fpDueEventId: '', fpOpenEventId: '', fpSig: '', garDueEventId: '', garOpenEventId: '', garSig: '' }));
+    d.tasks = (src.tasks || []).map(t => ({ id: uid(), label: t.label, done: false }));
+  }
+  d.copyNote = 'Copied from \u201C' + jobTitle(src) + '\u201D. ' + (weeks ? 'Dates moved forward ' + weeks + ' week' + (weeks === 1 ? '' : 's') + ' to the next ' + new Date(Date.parse(d.startDate)).toLocaleDateString('en-GB', { weekday: 'long', timeZone: 'UTC' }) + ' \u2013 ' : '') + 'check the details, then save.';
+  return d;
+}
+
+// ---------- people (crew & passengers), aircraft, GAR details ----------
+// Kept in the pilot's own Google spreadsheet (see Code.gs). The page only loads them when something needs them.
+function ensureDir() {
+  const D = S.dir;
+  if (D.loaded || D.loading || D.error) return;     // after a failure wait for "Try again" instead of re-requesting on every redraw
+  D.loading = true; D.error = '';
+  api('getDirectory').then(r => { Object.assign(D, r, { loaded: true }); })
+    .catch(e => { D.error = e.message || String(e); })
+    .finally(() => { D.loading = false; render(); });
+}
+const todayISO = () => new Date().toISOString().slice(0, 10);
+const personName = p => (p.forenames ? p.forenames + ' ' : '') + p.surname;
+const acLabel = a => a.reg + (a.type ? ' · ' + a.type : '');
+const countryName = c => (COUNTRY_LIST.find(x => x[0] === c) || [c, c])[1];
+// Regulars for the leg's aircraft first, then everyone else (each group A-Z by surname).
+function sortedPeople(role, aircraftId) {
+  const all = S.dir.people.filter(p => p.role === role).sort((a, b) => (a.surname + a.forenames).localeCompare(b.surname + b.forenames));
+  const reg = aircraftId ? all.filter(p => (p.aircraft || []).includes(aircraftId)) : [];
+  return { regulars: reg, others: all.filter(p => !reg.includes(p)) };
+}
+function peopleBlock(l, role) {
+  const key = role === 'crew' ? 'crewIds' : 'paxIds', label = role === 'crew' ? 'Crew' : 'Passengers';
+  const chosen = (l[key] || []).map(id => S.dir.people.find(p => p.id === id)).filter(Boolean);
+  const { regulars, others } = sortedPeople(role === 'crew' ? 'crew' : 'passenger', l.aircraftId);
+  const ac = S.dir.aircraft.find(a => a.id === l.aircraftId);
+  const optsFor = list => list.filter(p => !(l[key] || []).includes(p.id)).map(p => '<option value="' + p.id + '">' + esc(personName(p)) + '</option>').join('');
+  const r = optsFor(regulars), o = optsFor(others);
+  const chips = chosen.map(p => '<span class="pchip' + (p.tdExpiry && l.date && p.tdExpiry < l.date ? ' bad' : '') + '">' + esc(personName(p)) +
+    '<button class="icon xs" data-act="person-del" data-key="' + key + '" data-pid="' + p.id + '" aria-label="Remove ' + esc(personName(p)) + '">✕</button></span>').join('');
+  return '<div class="peopleblock"><b>' + label + ' <span class="small">(' + chosen.length + ')</span></b>' +
+    (role === 'crew' && !chosen.length ? '<p class="small">If you add nobody, the first crew member in your list is used.</p>' : '') +
+    '<div class="chips">' + (chips || '<span class="small">None added</span>') + '</div>' +
+    ((r || o) ? '<select data-addperson="' + key + '" aria-label="Add ' + label.toLowerCase() + '"><option value="">+ Add ' + label.toLowerCase().replace(/s$/, '') + '…</option>' +
+      (r ? '<optgroup label="Regulars' + (ac ? ' on ' + esc(ac.reg) : '') + '">' + r + '</optgroup>' : '') +
+      (o ? '<optgroup label="' + (r ? 'Everyone else' : 'People') + '">' + o + '</optgroup>' : '') + '</select>' : '<span class="small">' + (chosen.length ? '' : 'No ' + label.toLowerCase() + ' saved yet – add them under People &amp; aircraft.') + '</span>') + '</div>';
+}
+function garBox(job, l) {
+  if (!S.dir.loaded) { ensureDir(); return '<div class="garbox"><p class="small">' + (S.dir.error ? 'Couldn’t load people and aircraft: ' + esc(S.dir.error) + ' <button class="linkbtn" data-act="dir-retry">Try again</button>' : 'Loading people and aircraft…') + '</p></div>'; }
+  const g = garData(job, l, S.dir);
+  const acOpts = '<option value="">Choose aircraft…</option>' + S.dir.aircraft.map(a => '<option value="' + a.id + '"' + (l.aircraftId === a.id ? ' selected' : '') + '>' + esc(acLabel(a)) + '</option>').join('');
+  return '<div class="garbox"><b>GAR details</b>' +
+    '<div class="grid2"><label class="fld"><span>Aircraft</span><select data-f="aircraftId">' + acOpts + '</select></label>' +
+    fld('Arrival time (UTC)', 'data-f="arrive"', l.arrive, 'time') + '</div>' +
+    peopleBlock(l, 'crew') + peopleBlock(l, 'pax') +
+    '<button class="btn" data-act="make-gar" data-id="' + l.id + '"' + (g.missing.length ? ' aria-disabled="true"' : '') + '>Create GAR file (.xlsx)</button>' +
+    (g.missing.length ? '<p class="small">Still needed: ' + esc(g.missing.join('; ')) + '.</p>' : '<p class="small">Ready. The file is the Home Office form, filled in for you to check and submit.</p>') +
+    '</div>';
+}
+
+function renderDir(app) {
+  ensureDir();
+  const D = S.dir, view = S.dirView;
+  const head = '<header class="bar"><button class="btn ghost" data-act="dir-close">← Jobs</button><b>People &amp; aircraft</b></header>';
+  const tabs = '<nav class="tabs sub">' + [['people', 'People'], ['aircraft', 'Aircraft'], ['settings', 'GAR details']].map(t =>
+    '<div class="tab ' + (view === t[0] ? 'on' : '') + '" data-act="dir-tab" data-view="' + t[0] + '">' + t[1] + '</div>').join('') + '</nav>';
+  let body = '';
+  if (!D.loaded) body = D.error ? '<p class="fpstat late">' + esc(D.error) + ' <button class="linkbtn" data-act="dir-retry">Try again</button></p>' : '<p class="small">Loading…</p>';
+  else if (S.dirEdit) body = S.dirEdit.kind === 'person' ? personForm(S.dirEdit.rec) : aircraftForm(S.dirEdit.rec);
+  else if (view === 'people') {
+    const row = p => {
+      const exp = p.tdExpiry && p.tdExpiry < todayISO();
+      return '<button class="card plain" data-act="dir-edit" data-kind="person" data-id="' + p.id + '"><b>' + esc(personName(p)) + '</b>' +
+        '<div class="small">' + esc(p.tdType || 'Passport') + (p.tdNumber ? ' ••••' + esc(p.tdNumber.slice(-3)) : ' (no number yet)') + (p.tdExpiry ? ' · expires ' + esc(fmtDate(p.tdExpiry)) : '') + (exp ? ' <span class="fpstat late">EXPIRED</span>' : '') + '</div>' +
+        ((p.aircraft || []).length ? '<div class="small">Regular on ' + esc(p.aircraft.map(id => (D.aircraft.find(a => a.id === id) || { reg: '?' }).reg).join(', ')) + '</div>' : '') + '</button>';
+    };
+    const crew = D.people.filter(p => p.role === 'crew'), pax = D.people.filter(p => p.role !== 'crew');
+    const byName = (a, b) => (a.surname + a.forenames).localeCompare(b.surname + b.forenames);
+    body = '<p class="small">Saved in your own Google spreadsheet, so a flight’s GAR can be filled in quickly. Passport numbers are only shown in part here.</p>' +
+      '<h2 class="sec">Crew <small>' + crew.length + '</small></h2>' + (crew.sort(byName).map(row).join('') || '<div class="empty">Add yourself first, as crew.</div>') +
+      '<h2 class="sec">Passengers <small>' + pax.length + '</small></h2>' + (pax.sort(byName).map(row).join('') || '<div class="empty">No passengers saved yet.</div>') +
+      '<button class="btn primary block" data-act="dir-new" data-kind="person">+ Add a person</button>';
+  } else if (view === 'aircraft') {
+    body = (D.aircraft.map(a => '<button class="card plain" data-act="dir-edit" data-kind="aircraft" data-id="' + a.id + '"><b>' + esc(a.reg) + '</b><div class="small">' + esc([a.type, a.base && 'base ' + a.base, a.reason].filter(Boolean).join(' · ')) + '</div></button>').join('') || '<div class="empty">No aircraft yet.</div>') +
+      '<button class="btn primary block" data-act="dir-new" data-kind="aircraft">+ Add an aircraft</button>';
+  } else {
+    body = '<p class="small">Put on every GAR as the responsible person. The form allows 70 characters for the contact.</p>' +
+      fld('Contact number and email', 'id="gsContact" maxlength="70" placeholder="+44 7700 900123 name@example.com"', D.garSettings.contact) +
+      fld('Responsible person address', 'id="gsAddress" placeholder="Name, street, town, postcode"', D.garSettings.address) +
+      '<button class="btn primary block" data-act="dir-save-settings">Save</button>';
+  }
+  app.innerHTML = head + '<main>' + (S.dirEdit ? '' : tabs) + body + '</main>' +
+    '<datalist id="countries">' + COUNTRY_LIST.map(c => '<option value="' + c[0] + '">' + esc(c[1]) + '</option>').join('') + '</datalist>';
+}
+function personForm(p) {
+  const sel = (id, val, opts) => '<select id="' + id + '">' + opts.map(o => '<option' + (o === val ? ' selected' : '') + '>' + o + '</option>').join('') + '</select>';
+  const ac = S.dir.aircraft.map(a => '<label class="inline"><input type="checkbox" data-pac value="' + a.id + '" ' + ((p.aircraft || []).includes(a.id) ? 'checked' : '') + '> ' + esc(a.reg) + '</label>').join(' ');
+  return '<h2 class="sec">' + (p.id ? 'Edit person' : 'New person') + '</h2>' +
+    '<label class="fld"><span>Role</span><select id="pRole"><option value="passenger"' + (p.role !== 'crew' ? ' selected' : '') + '>Passenger</option><option value="crew"' + (p.role === 'crew' ? ' selected' : '') + '>Crew (e.g. the pilot)</option></select></label>' +
+    '<div class="grid2">' + fld('Surname', 'id="pSurname"', p.surname) + fld('Forenames', 'id="pForenames"', p.forenames) + '</div>' +
+    '<div class="grid2"><label class="fld"><span>Sex</span>' + sel('pSex', p.sex || 'Unspecified', ['Male', 'Female', 'Unspecified']) + '</label>' + fld('Date of birth', 'id="pDob"', p.dob, 'date') + '</div>' +
+    '<div class="grid2">' + fld('Place of birth', 'id="pPob"', p.pob) + fld('Nationality (3-letter code)', 'id="pNat" list="countries" maxlength="3" autocapitalize="characters" placeholder="e.g. GBR"', p.nationality) + '</div>' +
+    '<div class="grid2"><label class="fld"><span>Document</span>' + sel('pTdType', p.tdType || 'Passport', ['Passport', 'Identity card', 'Other']) + '</label>' + fld('If other, what', 'id="pTdOther"', p.tdOther) + '</div>' +
+    '<div class="grid2">' + fld('Issuing country (3-letter code)', 'id="pTdCountry" list="countries" maxlength="3" autocapitalize="characters" placeholder="e.g. GBR"', p.tdCountry) + fld('Document number', 'id="pTdNumber" autocapitalize="characters"', p.tdNumber) + '</div>' +
+    fld('Document expiry date', 'id="pTdExpiry"', p.tdExpiry, 'date') +
+    fld('Home address, or address visiting in the UK', 'id="pAddress"', p.address) +
+    (S.dir.aircraft.length ? '<div class="fld"><span>Regularly flies on (listed first for these aircraft)</span><div class="chips">' + ac + '</div></div>' : '<p class="small">Add your aircraft first if you want regulars listed first.</p>') +
+    '<p class="small" id="dirErr"></p>' +
+    '<button class="btn primary block" data-act="dir-save" data-kind="person">Save</button>' +
+    '<button class="btn block" data-act="dir-cancel">Cancel</button>' +
+    (p.id ? '<button class="btn danger block" data-act="dir-delete" data-kind="person" data-id="' + p.id + '">Delete this person</button>' : '');
+}
+function aircraftForm(a) {
+  return '<h2 class="sec">' + (a.id ? 'Edit aircraft' : 'New aircraft') + '</h2>' +
+    '<div class="grid2">' + fld('Registration', 'id="aReg" autocapitalize="characters" placeholder="e.g. GABCD (no hyphen)"', a.reg) + fld('Type', 'id="aType" placeholder="e.g. Cirrus SR22"', a.type) + '</div>' +
+    '<div class="grid2">' + fld('Usual base (ICAO)', 'id="aBase" autocapitalize="characters" placeholder="e.g. EGKB"', a.base) + fld('Owner / operator (if not you)', 'id="aOwner"', a.owner) + '</div>' +
+    '<label class="fld"><span>Reason for visit</span><select id="aReason">' + ['Short Term Visit', 'Based', 'Maintenance', 'Permanent Import', 'Repair'].map(r => '<option' + (r === (a.reason || 'Short Term Visit') ? ' selected' : '') + '>' + r + '</option>').join('') + '</select></label>' +
+    '<p class="small" id="dirErr"></p>' +
+    '<button class="btn primary block" data-act="dir-save" data-kind="aircraft">Save</button><button class="btn block" data-act="dir-cancel">Cancel</button>' +
+    (a.id ? '<button class="btn danger block" data-act="dir-delete" data-kind="aircraft" data-id="' + a.id + '">Delete this aircraft</button>' : '');
+}
+const val = id => ($('#' + id) || {}).value || '';
+async function dirSave(kind) {
+  const err = $('#dirErr');
+  try {
+    if (kind === 'person') {
+      const rec = Object.assign({}, S.dirEdit.rec, { role: val('pRole'), surname: val('pSurname'), forenames: val('pForenames'), sex: val('pSex'), dob: val('pDob'), pob: val('pPob'),
+        nationality: val('pNat').toUpperCase(), tdType: val('pTdType'), tdOther: val('pTdOther'), tdCountry: val('pTdCountry').toUpperCase(), tdNumber: val('pTdNumber'),
+        tdExpiry: val('pTdExpiry'), address: val('pAddress'), aircraft: [...document.querySelectorAll('[data-pac]:checked')].map(c => c.value) });
+      if (!rec.surname.trim()) { err.textContent = 'A surname is needed.'; return; }
+      const bad = ['nationality', 'tdCountry'].filter(k => rec[k] && !COUNTRY_LIST.some(c => c[0] === rec[k]));
+      if (bad.length) { err.textContent = 'Use the 3-letter country codes from the list (e.g. GBR, FRA, USA).'; return; }
+      const saved = await busy(() => api('savePerson', rec));
+      S.dir.people = S.dir.people.filter(p => p.id !== saved.id).concat(saved);
+    } else {
+      const rec = Object.assign({}, S.dirEdit.rec, { reg: val('aReg'), type: val('aType'), base: val('aBase'), owner: val('aOwner'), reason: val('aReason') });
+      if (!rec.reg.trim()) { err.textContent = 'A registration is needed.'; return; }
+      const saved = await busy(() => api('saveAircraft', rec));
+      S.dir.aircraft = S.dir.aircraft.filter(a => a.id !== saved.id).concat(saved);
+    }
+    S.dirEdit = null; render(); toast('Saved', '');
+  } catch (e) { err.textContent = e.message || String(e); }
+}
 // ---------- import jobs from a spreadsheet (.xlsx / .csv, made from the template) ----------
 // The file is read in this browser (SheetJS, loaded from cdnjs only when needed); nothing is sent anywhere
 // except the finished jobs, which go to your own Apps Script exactly like jobs typed in by hand.
@@ -1163,7 +1467,7 @@ function importPayload(g) {
     data.flights = [newFlight('out'), newFlight('return')];
     data.stays = [{ id: uid(), location: '', checkIn: g.start, checkOut: g.end || g.start, ref: '', booked: false }];
     data.legs = g.legs.map(l => Object.assign(newLeg(l.date), { from: l.from, to: l.to, route: l.from + ' > ' + l.to, time: l.time, dest: icaoCountry(l.to) || 'UK' }));
-    data.tasks = [{ id: uid(), label: 'Send invoice', done: false }, { id: uid(), label: 'Log expenses and receipts', done: false }];
+    data.tasks = POST_FLIGHT_TASKS();
   } else {
     data.notes = [g.notes].concat(g.legs.map(l => l.from + ' > ' + l.to + (l.date ? ' ' + l.date : '') + (l.time ? ' ' + l.time + 'Z' : ''))).filter(Boolean).join('\n');
   }
@@ -1230,9 +1534,14 @@ async function importGo() {
   S.imp = null; S.openId = null; S.tab = 'active'; render();
   toast('Imported ' + done + ' job' + (done === 1 ? '' : 's') + ' – confirmed ones are on your calendar', '');
 }
-if (window.PILOT_MOCK) window.PILOT_TEST = { parseImport, cellDate, cellTime, importFile };   // lets the automated tests reach the import helpers
+if (window.PILOT_MOCK) window.PILOT_TEST = { parseImport, cellDate, cellTime, importFile, garData, fillGarXlsx, sortedPeople };   // lets the automated tests reach the import helpers
 document.addEventListener('change', e => {
   const el = e.target;
+  if (el.dataset && el.dataset.addperson && el.value && S.openId) {            // add a crew member / passenger to a leg
+    const j = findJob(S.openId), li = el.closest('[data-list]'), l = j && li && j.legs.find(x => x.id === li.dataset.id);
+    if (l) { const k = el.dataset.addperson; l[k] = (l[k] || []).concat(el.value); scheduleSave(j.id, 250); render(); }
+    return;
+  }
   if (el.id === 'impFile' && el.files && el.files[0]) importFile(el.files[0]);
   if (el.dataset && el.dataset.imp !== undefined && S.imp) { S.imp.groups[+el.dataset.imp].pick = el.checked; render(); }
 });
