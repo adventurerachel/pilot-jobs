@@ -129,6 +129,11 @@ input,textarea,select{width:100%;font:inherit;padding:10px 12px;border:1px solid
 textarea{resize:vertical}
 input[type=checkbox]{width:24px;height:24px;min-height:0;flex:none;accent-color:var(--conf);margin:0}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+.ivrow{border-top:1px solid var(--line);padding-top:6px;margin-top:8px}
+.amt{padding:10px 0;font-weight:600}
+.invtotal{text-align:right;font-size:1.15rem;margin:12px 0}
+.invt{width:100%;border-collapse:collapse;margin:8px 0}.invt td,.invt th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.invt td:last-child,.invt th:last-child{text-align:right}
 @media (max-width:420px){.grid2{grid-template-columns:1fr}}
 .inline{display:flex;align-items:center;gap:10px;margin:8px 0;min-height:36px}
 .chip{font-size:.88rem;font-weight:600;color:var(--muted)}
@@ -379,7 +384,7 @@ const cmp = (a, b) => sortKey(a) < sortKey(b) ? -1 : sortKey(a) > sortKey(b) ? 1
 // ---------- state ----------
 const S = { active: [], archive: [], appUrl: '', calendarName: 'Pilot Jobs', reminders: [1440, 240, 120],
             colours: { tentative: 'orange', confirmed: 'green' },
-            tab: 'active', todoSort: 'date', openId: null, draft: null, needConnect: false, connectError: '', cxUrl: null, loaded: false, error: '', opened: false, imp: null, dir: { people: [], aircraft: [], garSettings: { contact: '', address: '' }, loaded: false, loading: false, error: '' }, dirView: 'people', dirEdit: null };
+            tab: 'active', todoSort: 'date', openId: null, draft: null, needConnect: false, connectError: '', cxUrl: null, loaded: false, error: '', opened: false, imp: null, dir: { people: [], aircraft: [], garSettings: { contact: '', address: '' }, clients: [], business: {}, loaded: false, loading: false, error: '' }, dirView: 'people', dirEdit: null, invoices: [], invEdit: null };
 const UI = { open: new Set() };
 const saving = {};
 let chip = '';
@@ -390,7 +395,11 @@ const isArchived = j => S.archive.indexOf(j) >= 0;
 // ---------- checklist model ----------
 const legName = l => l.route ? ' (' + l.route + ')' : '';
 // How the pilot gets to / from the job. "car" = driving himself: nothing to book, no calendar event.
-const MODES = [['flight', 'Flight'], ['train', 'Train'], ['car', 'Driving'], ['other', 'Other (bus, ferry\u2026)']];
+const MODE_ICON = { flight: '\u2708\uFE0F', train: '\uD83D\uDE86', car: '\uD83D\uDE97', other: '\uD83D\uDE8C' };   // plane, train, car, bus
+const MODES = [['flight', MODE_ICON.flight + ' Flight'], ['train', MODE_ICON.train + ' Train'], ['car', MODE_ICON.car + ' Driving'], ['other', MODE_ICON.other + ' Other (bus, ferry\u2026)']];
+const STAY_ICON = '\uD83C\uDFE8', INV_ICON = '\uD83E\uDDFE';   // hotel, receipt
+const EXP_ICON = '\uD83D\uDCB7';   // pound banknote
+const taskIcon = label => /expense/i.test(label || '') ? EXP_ICON : /invoice/i.test(label || '') ? INV_ICON : '';
 const travelMode = f => f.mode || (f.commercial === false ? 'other' : 'flight');
 // Drive end time for the hint / summary: leave time + drive time (hh:mm). Returns '' unless both are set.
 const durText = t => { const m = /^(\d{2}):(\d{2})$/.exec(t || ''); if (!m) return ''; const hh = +m[1], mm = +m[2]; return (hh ? hh + ' h' : '') + (hh && mm ? ' ' : '') + (mm ? mm + ' min' : '') || ''; };
@@ -402,7 +411,7 @@ function driveEnd(f) {
   return en.toISOString().slice(0, 10) !== new Date(st).toISOString().slice(0, 10) ? hm + ' the next day' : hm;
 }
 const fixTravel = f => { f.mode = travelMode(f); f.commercial = f.mode === 'flight'; return f; };
-const CATS = [['gar', 'Submit GARs'], ['plan', 'File flight plans'], ['handling', 'Handling, fuel & permits'], ['wx', 'Weather & NOTAM briefings'],
+const CATS = [['chase', 'Chase unpaid invoices'], ['gar', 'Submit GARs'], ['plan', 'File flight plans'], ['handling', 'Handling, fuel & permits'],
   ['out', 'Book outbound travel'], ['ret', 'Book return travel'], ['checkin', 'Check in for flights'],
   ['stay', 'Book accommodation'], ['after', 'Post-flight tasks']];
 function allChecks(j) {
@@ -419,26 +428,25 @@ function allChecks(j) {
     out.push({ cat: 'plan', label: 'File flight plan' + legName(l), detail: l.route, done: l.plan, list: 'legs', id: l.id, field: 'plan',
       date: w ? new Date(w.due).toISOString().slice(0, 10) : d, leg: l });
     out.push({ cat: 'handling', label: 'Arrange handling, fuel & permits' + legName(l), detail: l.route, done: l.handling, list: 'legs', id: l.id, field: 'handling', date: d });
-    out.push({ cat: 'wx', label: 'Weather & NOTAM briefing' + legName(l), detail: l.route, done: l.wx, list: 'legs', id: l.id, field: 'wx', date: d });
   });
   const noun = f => ({ flight: 'flight', train: 'train' }[f.mode] || 'travel');
   j.flights.filter(f => f.dir === 'out' && f.mode !== 'car').forEach(f =>
-    out.push({ cat: 'out', label: 'Book outbound ' + noun(f) + (f.route ? ' (' + f.route + ')' : ''), detail: f.route, done: f.booked,
+    out.push({ cat: 'out', icon: MODE_ICON[f.mode], label: 'Book outbound ' + noun(f) + (f.route ? ' (' + f.route + ')' : ''), detail: f.route, done: f.booked,
       list: 'flights', id: f.id, field: 'booked', date: day(f.depart) || start }));
   j.flights.filter(f => f.dir === 'return' && f.mode !== 'car').forEach(f =>
-    out.push({ cat: 'ret', label: 'Book return ' + noun(f) + (f.route ? ' (' + f.route + ')' : ''), detail: f.route, done: f.booked,
+    out.push({ cat: 'ret', icon: MODE_ICON[f.mode], label: 'Book return ' + noun(f) + (f.route ? ' (' + f.route + ')' : ''), detail: f.route, done: f.booked,
       list: 'flights', id: f.id, field: 'booked', date: day(f.depart) || end }));
   ['out', 'return'].forEach(dir => j.flights.filter(f => f.dir === dir && f.commercial).forEach(f =>
-    out.push({ cat: 'checkin', label: 'Check in for ' + (dir === 'out' ? 'outbound' : 'return') + ' flight' + (f.route ? ' (' + f.route + ')' : ''),
+    out.push({ cat: 'checkin', icon: MODE_ICON.flight, label: 'Check in for ' + (dir === 'out' ? 'outbound' : 'return') + ' flight' + (f.route ? ' (' + f.route + ')' : ''),
       detail: f.route, done: f.checkedIn, list: 'flights', id: f.id, field: 'checkedIn', date: day(f.depart) || (dir === 'out' ? start : end), when: f.depart })));
   j.stays.forEach(s =>
-    out.push({ cat: 'stay', label: 'Book accommodation' + (s.location ? ' \u2013 ' + s.location : ''), detail: s.location, done: s.booked,
+    out.push({ cat: 'stay', icon: STAY_ICON, label: 'Book accommodation' + (s.location ? ' \u2013 ' + s.location : ''), detail: s.location, done: s.booked,
       list: 'stays', id: s.id, field: 'booked', date: s.checkIn || start }));
-  j.tasks.forEach(t => out.push({ cat: 'after', label: t.label, detail: t.label, done: t.done, list: 'tasks', id: t.id, field: 'done', date: end }));
+  j.tasks.forEach(t => out.push({ cat: 'after', icon: taskIcon(t.label), label: t.label, detail: t.label, done: t.done, list: 'tasks', id: t.id, field: 'done', date: end }));
   return out;
 }
 function todoItems() {
-  const out = [];
+  const out = chaseItems();
   S.active.filter(j => j.status === 'confirmed').forEach(j =>
     allChecks(j).forEach(c => { if (!c.done) out.push(Object.assign({ job: j }, c)); }));
   const key = t => (t.date || '9999-99-99');
@@ -446,7 +454,13 @@ function todoItems() {
   return out.sort((a, b) => key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : order(a) - order(b));
 }
 function todoRow(t, byTask) {
-  const main = byTask ? (t.detail || 'Details to be added') : t.label;
+  if (t.cat === 'chase') {
+    const i = t.invoice;
+    return '<div class="todo"><div class="todo-t"><b>' + esc(byTask ? t.detail : t.label + ' \u00B7 ' + i.clientName) + '</b><span class="sum">' + money(i.total) + ' \u00B7 <span class="fpstat late">' + invOverdueDays(i) +
+      ' day' + (invOverdueDays(i) === 1 ? '' : 's') + ' overdue</span>' + ((i.reminders || []).length ? ' \u00B7 last reminder ' + esc(fmtDate(i.reminders[i.reminders.length - 1].at)) : '') + '</span>' +
+      '<button class="btn primary" data-act="inv-remind" data-id="' + i.id + '">Email me a reminder to forward</button> <button class="linkbtn" data-act="inv-open" data-id="' + i.id + '">View invoice</button></div></div>';
+  }
+  const main = (t.icon ? t.icon + ' ' : '') + (byTask ? (t.detail || 'Details to be added') : t.label);
   let sub = esc(jobTitle(t.job)) + (byTask && t.date ? ' \u00b7 ' + fmtDate(t.date) : '');
   if (t.cat === 'checkin') sub += '<br><span class="fpstat">' + (t.when ? 'Departs ' + esc(fmtDT(t.when)) : 'Add the departure time to get reminders') + '</span>';
   if ((t.cat === 'plan' || t.cat === 'gar') && t.leg) { const s = legStatus(t.leg, t.cat === 'gar' ? 'gar' : 'fp'); sub += '<br><span class="fpstat ' + s.level + '">' + esc(s.text) + '</span>'; }
@@ -481,7 +495,7 @@ function progress(j) {
 }
 function isDone(list, it) {
   if (list === 'flights' && travelMode(it) === 'car') return true;          // driving yourself: nothing to do
-  if (list === 'legs') return it.gar && it.plan && it.handling && it.wx;
+  if (list === 'legs') return it.gar && it.plan && it.handling;
   return !!(it.booked || it.done);
 }
 function minutesText() {
@@ -510,7 +524,7 @@ function itemSummary(list, it) {
       ' \u00B7 ' + (it.booked ? 'Booked \u2713' : 'To book');
   }
   if (list === 'legs') {
-    const k = ['gar', 'plan', 'handling', 'wx'].filter(x => it[x]).length;
+    const k = ['gar', 'plan', 'handling'].filter(x => it[x]).length;
     const hot = kind => { const lv = legStatus(it, kind).level; return lv === 'late' || lv === 'soon'; };
     return [it.route || 'Route TBC', it.date ? fmtDate(it.date) + (it.time ? ' ' + it.time + 'Z' : '') : '', k + '/4 done',
       hot('gar') ? '\u26A0 GAR due' : '', hot('fp') ? '\u26A0 flight plan due' : ''].filter(Boolean).join(' \u00B7 ');
@@ -632,19 +646,22 @@ function renderList(app) {
     if (tent.length) body += '<h2 class="sec"><span class="dot tentative"></span>Tentative <small>' + tent.length + '</small></h2>' + tent.map(card).join('');
   } else if (S.tab === 'todo') {
     body = todoHTML();
+  } else if (S.tab === 'inv') {
+    body = invoicesHTML();
   } else {
     body = arch.length ? arch.map(card).join('') : '<div class="empty">Nothing archived yet.<br>Cancelled and completed jobs are kept here.</div>';
   }
-  const todoCount = todoItems().length;
+  const todoCount = todoItems().length, unpaidCount = (S.invoices || []).filter(i => i.status === 'sent').length;
   app.innerHTML =
     '<header class="bar"><h1>Pilot Jobs</h1><div class="bar-actions">' +
     '<button class="icon" data-act="refresh" aria-label="Refresh">\u21BB</button>' +
     '<button class="btn primary" data-act="new">+ New job</button></div></header>' +
     '<nav class="tabs"><div class="tab ' + (S.tab === 'active' ? 'on' : '') + '" data-act="tab" data-tab="active">Active (' + (tent.length + conf.length) + ')</div>' +
     '<div class="tab ' + (S.tab === 'todo' ? 'on' : '') + '" data-act="tab" data-tab="todo">To do (' + todoCount + ')</div>' +
-    '<div class="tab ' + (S.tab === 'archive' ? 'on' : '') + '" data-act="tab" data-tab="archive">Archive (' + arch.length + ')</div></nav>' +
-    '<main>' + (S.tab === 'archive' ? '' : alertBanner()) + body +
-    (S.tab === 'active' ? '<p class="foot"><button class="linkbtn" data-act="dir-open">People &amp; aircraft</button> \u00B7 <button class="linkbtn" data-act="import-open">Import jobs from a spreadsheet</button></p>' : '') + '</main>' +
+    '<div class="tab ' + (S.tab === 'archive' ? 'on' : '') + '" data-act="tab" data-tab="archive">Archive (' + arch.length + ')</div>' +
+    '<div class="tab ' + (S.tab === 'inv' ? 'on' : '') + '" data-act="tab" data-tab="inv">Invoices' + (unpaidCount ? ' (' + unpaidCount + ')' : '') + '</div></nav>' +
+    '<main>' + (S.tab === 'archive' || S.tab === 'inv' ? '' : alertBanner()) + body +
+    (S.tab === 'active' ? '<p class="foot"><button class="linkbtn" data-act="dir-open">Setup (people, aircraft, clients, invoicing)</button> \u00B7 <button class="linkbtn" data-act="import-open">Import jobs from a spreadsheet</button></p>' : '') + '</main>' +
     (window.PILOT_MOCK ? '' : '<p class="foot"><button class="linkbtn" data-act="disconnect">Disconnect this device</button></p>');
 }
 
@@ -659,8 +676,8 @@ function flightHTML(f) {
   const numLabel = { flight: 'Flight no.', train: 'Train / service', other: 'Service / number' }[f.mode];
   const modeSel = '<label class="inline">Travel by <select data-f="mode" aria-label="Travel by">' + MODES.map(m => '<option value="' + m[0] + '"' + (f.mode === m[0] ? ' selected' : '') + '>' + m[1] + '</option>').join('') + '</select></label>';
   return '<div class="item ' + (isDone('flights', f) ? 'done' : '') + '" data-list="flights" data-id="' + f.id + '">' +
-    '<div class="item-h">' + (car ? '<span class="modeicon" aria-hidden="true">\uD83D\uDE97</span>' : '<input type="checkbox" data-f="booked" aria-label="Booked" ' + (f.booked ? 'checked' : '') + '>') +
-    '<button class="item-t" data-act="toggle" data-id="' + f.id + '"><b>' + (f.dir === 'out' ? 'Outbound' : 'Return') + ' ' + what + '</b>' +
+    '<div class="item-h">' + (car ? '<span class="modeicon" aria-hidden="true">' + MODE_ICON.car + '</span>' : '<input type="checkbox" data-f="booked" aria-label="Booked" ' + (f.booked ? 'checked' : '') + '>') +
+    '<button class="item-t" data-act="toggle" data-id="' + f.id + '"><b>' + MODE_ICON[f.mode] + ' ' + (f.dir === 'out' ? 'Outbound' : 'Return') + ' ' + what + '</b>' +
     '<span class="sum" data-sum>' + esc(itemSummary('flights', f)) + '</span></button>' +
     '<button class="icon sm" data-act="del" aria-label="Remove">\u2715</button></div>' +
     '<div class="item-sub">' + modeSel + ' <span data-checkin' + (f.commercial ? '' : ' hidden') + '><label class="inline"><input type="checkbox" data-f="checkedIn" ' + (f.checkedIn ? 'checked' : '') + '> Checked in <span class="small">(stops the check-in reminders)</span></label></span></div>' +
@@ -675,7 +692,7 @@ function stayHTML(s) {
   const open = UI.open.has(s.id);
   return '<div class="item ' + (s.booked ? 'done' : '') + '" data-list="stays" data-id="' + s.id + '">' +
     '<div class="item-h"><input type="checkbox" data-f="booked" aria-label="Booked" ' + (s.booked ? 'checked' : '') + '>' +
-    '<button class="item-t" data-act="toggle" data-id="' + s.id + '"><b>Accommodation</b>' +
+    '<button class="item-t" data-act="toggle" data-id="' + s.id + '"><b>' + STAY_ICON + ' Accommodation</b>' +
     '<span class="sum" data-sum>' + esc(itemSummary('stays', s)) + '</span></button>' +
     '<button class="icon sm" data-act="del" aria-label="Remove">\u2715</button></div>' +
     (open ? '<div class="item-b">' + fld('Location / hotel', 'data-f="location" placeholder="e.g. Nice"', s.location) +
@@ -708,12 +725,12 @@ function legHTML(l, i) {
     fld('Latest you must file (hours before departure)', 'data-f="fpLatest" inputmode="decimal" min="0" step="any" placeholder="e.g. 48 if needed 48 h ahead"', l.fpLatest, 'number') +
     '</div>' + cb('fpNoRule', 'No specific rule (any time before departure)') +
     '<p class="fpstat ' + st.level + '" data-fp>' + esc(st.text) + '</p></div>' +
-    cb('handling', 'Handling, fuel & permits') + cb('wx', 'Weather & NOTAM briefing') + '</div></div>';
+    cb('handling', 'Handling, fuel & permits') + '</div></div>';
 }
 function taskHTML(t) {
   return '<div class="item ' + (t.done ? 'done' : '') + '" data-list="tasks" data-id="' + t.id + '">' +
     '<div class="item-h"><input type="checkbox" data-f="done" ' + (t.done ? 'checked' : '') + '>' +
-    '<div class="item-t static"><b>' + esc(t.label) + '</b></div>' +
+    '<div class="item-t static"><b>' + (taskIcon(t.label) ? taskIcon(t.label) + ' ' : '') + esc(t.label) + '</b></div>' +
     '<button class="icon sm" data-act="del" aria-label="Remove">\u2715</button></div></div>';
 }
 function section(title, items, hint, addAct, addLabel) {
@@ -725,11 +742,11 @@ function checklistHTML(j) {
   const p = progress(j);
   return '<div class="next"><b>Next up</b><span id="nextUp">' + (p.next ? esc(p.next) : 'All done \u2713') + '</span>' +
       '<div class="track" id="progress"><i style="width:' + p.pct + '%"></i></div><span class="small" id="progText">' + p.done + ' of ' + p.total + ' done</span></div>' +
-    section('1 \u00B7 Flights you operate', j.legs.map(legHTML).join(''), 'Add each leg to track its GAR, flight plan, handling/fuel/permits and briefing.', 'add-leg', '+ Add leg') +
-    '<section class="sect"><h3>2 \u00B7 Outbound / return travel</h3>' +
+    section('1 \u00B7 Flights you operate', j.legs.map(legHTML).join(''), 'Add each leg to track its GAR, flight plan, handling/fuel/permits.', 'add-leg', '+ Add leg') +
+    '<section class="sect"><h3>2 \u00B7 \uD83E\uDDF3 Outbound / return travel</h3>' +
       '<h4 class="sub">Outbound</h4>' + (j.flights.filter(f => f.dir === 'out').map(flightHTML).join('') || '<p class="small">No outbound travel to book.</p>') + '<button class="btn" data-act="add-out">+ Add outbound travel</button>' +
       '<h4 class="sub">Return</h4>' + (j.flights.filter(f => f.dir === 'return').map(flightHTML).join('') || '<p class="small">No return travel to book.</p>') + '<button class="btn" data-act="add-ret">+ Add return travel</button></section>' +
-    section('3 \u00B7 Accommodation', j.stays.map(stayHTML).join(''), 'No accommodation to book.', 'add-stay', '+ Add accommodation (another location or night)') +
+    section('3 \u00B7 ' + STAY_ICON + ' Accommodation', j.stays.map(stayHTML).join(''), 'No accommodation to book.', 'add-stay', '+ Add accommodation (another location or night)') +
     '<section class="sect"><h3>4 \u00B7 Post-flight tasks</h3>' + j.tasks.map(taskHTML).join('') +
       '<div class="addtask"><input id="newTask" placeholder="Add your own task" autocomplete="off"><button class="btn" data-act="add-task">Add</button></div></section>';
 }
@@ -757,16 +774,17 @@ function renderDetail(app) {
     fld('Route / locations', 'data-f="location" placeholder="e.g. EGKB - LFMN - EGKB"', j.location) +
     '<div class="grid2">' + fld('Start date', 'data-f="startDate"', j.startDate, 'date') + fld('End date', 'data-f="endDate"', j.endDate, 'date') + '</div>' +
     '<div class="grid2">' + fld('Start time', 'data-f="startTime"', j.startTime, 'time') + fld('End time', 'data-f="endTime"', j.endTime, 'time') + '</div>' +
+    clientSelect(j) +
     '<label class="fld"><span>Notes</span><textarea data-f="notes" rows="5">' + esc(j.notes) + '</textarea></label>' +
     '<p class="small" id="calstate">' + calState(j) + '</p>' +
     (j.status === 'tentative' ? actions : '') +
-    (j.status === 'confirmed' ? checklistHTML(j) + actions : '') +
+    (j.status === 'confirmed' ? checklistHTML(j) + jobInvoiceBox(j) + actions : '') +
     '</main>';
   const c = $('#chip'); if (c) paintChip(c);
 }
 
 // ---------- new job (tentative by default; tick "Confirmed flight" for the full checklist) ----------
-const newLeg = date => ({ id: uid(), route: '', from: '', to: '', destManual: false, date: date || '', time: '', dest: 'UK', fpEarliest: '', fpLatest: '', fpNoRule: false, gar: false, plan: false, handling: false, wx: false,
+const newLeg = date => ({ id: uid(), route: '', from: '', to: '', destManual: false, date: date || '', time: '', dest: 'UK', fpEarliest: '', fpLatest: '', fpNoRule: false, gar: false, plan: false, handling: false,
   fpDueEventId: '', fpOpenEventId: '', fpSig: '', garDueEventId: '', garOpenEventId: '', garSig: '' });
 function newDraft() {
   return { id: 'draft', status: 'tentative', prevStatus: '', title: '', notes: '', location: '', startDate: '', startTime: '', endDate: '', endTime: '',
@@ -808,7 +826,7 @@ function renderNew(app) {
       notes + checklistHTML(j);
   }
   app.innerHTML = '<header class="bar"><button class="btn ghost" data-act="back">← Cancel</button><b>New job</b></header>' +
-    '<main class="detail">' + (j.copyNote ? '<p class="fpstat info">' + esc(j.copyNote) + '</p>' : '') + tick + body +
+    '<main class="detail">' + (j.copyNote ? '<p class="fpstat info">' + esc(j.copyNote) + '</p>' : '') + tick + body + clientSelect(j) +
     '<p class="small" id="newErr" style="color:var(--danger)"></p>' +
     '<div class="actions"><button class="btn ' + (conf ? 'good' : 'primary') + '" data-act="save-new">' + (conf ? 'Save confirmed job' : 'Save tentative job') + '</button></div>' +
     '<p class="small">' + (conf ? 'Goes on the calendar in green. Commercial flights with departure times get check-in reminders, and flight plan / GAR deadlines get their own events.'
@@ -823,6 +841,7 @@ function renderArchived(app, j) {
     '<p class="meta small">' + (dateRange(j) || 'No date') + (j.location ? ' \u00B7 ' + esc(j.location) : '') + '</p>' +
     (j.notes ? '<p style="white-space:pre-wrap">' + esc(j.notes) + '</p>' : '') +
     (checks.length ? '<h3>Checklist when archived</h3>' + checks.map(c => '<div class="inline">' + (c.done ? '\u2705' : '\u2B1C') + ' ' + esc(c.label) + '</div>').join('') : '') +
+    (j.status === 'completed' || j.prevStatus === 'confirmed' ? jobInvoiceBox(j) : '') +
     '<div class="actions"><button class="btn primary" data-act="duplicate">Duplicate as new job</button><button class="btn" data-act="restore">Restore job</button></div>' +
     '<p class="small">Duplicate copies the job as a starting point for a new one (a regular flight, say): dates move forward by whole weeks so the weekday stays the same, and nothing is ticked off.</p>' +
     '<p class="small">Restoring ' + (j.status === 'cancelled' ? 'puts the job back on the calendar.' : 'moves it back to Confirmed.') + '</p></main>';
@@ -851,7 +870,7 @@ function render() {
       : '<div class="empty">Loading\u2026</div>';
     return;
   }
-  if (S.openId === 'dir') renderDir(app); else if (S.openId === 'import') renderImport(app); else if (S.openId === 'draft') renderNew(app); else if (S.openId) renderDetail(app); else renderList(app);
+  if (S.openId === 'inv') renderInvoice(app); else if (S.openId === 'dir') renderDir(app); else if (S.openId === 'import') renderImport(app); else if (S.openId === 'draft') renderNew(app); else if (S.openId) renderDetail(app); else renderList(app);
   window.scrollTo(0, y);
 }
 
@@ -956,18 +975,24 @@ const actions = {
   'dir-close'() { S.openId = null; S.dirEdit = null; render(); },
   'dir-tab'(t) { S.dirView = t.dataset.view; S.dirEdit = null; render(); },
   'dir-retry'() { S.dir.error = ''; S.dir.loaded = false; ensureDir(); render(); },
-  'dir-new'(t) { S.dirEdit = { kind: t.dataset.kind, rec: t.dataset.kind === 'person' ? { role: S.dir.people.some(p => p.role === 'crew') ? 'passenger' : 'crew' } : {} }; render(); },
-  'dir-edit'(t) { const list = t.dataset.kind === 'person' ? S.dir.people : S.dir.aircraft; S.dirEdit = { kind: t.dataset.kind, rec: JSON.parse(JSON.stringify(list.find(x => x.id === t.dataset.id))) }; render(); },
+  'dir-new'(t) { S.dirEdit = { kind: t.dataset.kind, rec: t.dataset.kind === 'client' ? {} : t.dataset.kind === 'person' ? { role: S.dir.people.some(p => p.role === 'crew') ? 'passenger' : 'crew' } : {} }; render(); },
+  'dir-edit'(t) { const list = t.dataset.kind === 'person' ? S.dir.people : t.dataset.kind === 'client' ? S.dir.clients : S.dir.aircraft; S.dirEdit = { kind: t.dataset.kind, rec: JSON.parse(JSON.stringify(list.find(x => x.id === t.dataset.id))) }; render(); },
   'dir-cancel'() { S.dirEdit = null; render(); },
   'dir-save'(t) { dirSave(t.dataset.kind); },
   'dir-delete'(t) {
-    if (!window.confirm('Delete this ' + (t.dataset.kind === 'person' ? 'person' : 'aircraft') + '? This can\u2019t be undone.')) return;
-    busy(() => api(t.dataset.kind === 'person' ? 'deletePerson' : 'deleteAircraft', t.dataset.id)).then(() => {
-      if (t.dataset.kind === 'person') S.dir.people = S.dir.people.filter(p => p.id !== t.dataset.id); else S.dir.aircraft = S.dir.aircraft.filter(a => a.id !== t.dataset.id);
+    const k = t.dataset.kind;
+    if (!window.confirm('Delete this ' + (k === 'person' ? 'person' : k === 'client' ? 'client' : 'aircraft') + '? This can\u2019t be undone.')) return;
+    busy(() => api(k === 'person' ? 'deletePerson' : k === 'client' ? 'deleteClient' : 'deleteAircraft', t.dataset.id)).then(() => {
+      if (k === 'person') S.dir.people = S.dir.people.filter(p => p.id !== t.dataset.id); else if (k === 'client') S.dir.clients = S.dir.clients.filter(c => c.id !== t.dataset.id); else S.dir.aircraft = S.dir.aircraft.filter(a => a.id !== t.dataset.id);
       S.dirEdit = null; render();
     }).catch(e => toast(e.message || String(e), 'err'));
   },
   'dir-save-settings'() { busy(() => api('saveGarSettings', { contact: val('gsContact'), address: val('gsAddress') })).then(s => { S.dir.garSettings = s; toast('Saved', ''); }).catch(e => toast(e.message || String(e), 'err')); },
+  'dir-save-biz'() {
+    busy(() => api('saveBusinessSettings', { name: val('bName'), reviewEmail: val('bReview'), address: val('bAddress'), email: val('bEmail'), phone: val('bPhone'), bankAccountName: val('bBankName'), sortCode: val('bSort'),
+      accountNumber: val('bAcc'), companyNo: val('bCoNo'), terms: val('bTerms'), prefix: val('bPrefix'), nextNumber: parseInt(val('bNext'), 10) || 0, footer: val('bFooter') }))
+      .then(b => { S.dir.business = b; toast('Saved', ''); render(); }).catch(e => toast(e.message || String(e), 'err'));
+  },
   'person-del'(t) {
     const j = findJob(S.openId), l = j && j.legs.find(x => x.id === t.closest('[data-list]').dataset.id); if (!l) return;
     l[t.dataset.key] = (l[t.dataset.key] || []).filter(id => id !== t.dataset.pid); scheduleSave(j.id, 250); render();
@@ -1091,6 +1116,7 @@ async function saveDraft() {
   const conf = j.status === 'confirmed';
   const data = { status: j.status };
   ['title', 'notes', 'location', 'startDate', 'startTime', 'endDate', 'endTime'].forEach(k => { data[k] = String(j[k] || '').trim(); });
+  data.clientId = j.clientId || '';
   if (conf) ['flights', 'stays', 'legs', 'tasks'].forEach(k => { data[k] = j[k]; });
   await busy(async () => {
     try {
@@ -1242,11 +1268,11 @@ function dupJob(src) {
   const d = newDraft();
   const had = src.status === 'confirmed' || src.status === 'completed' || src.prevStatus === 'confirmed';
   Object.assign(d, { title: src.title || '', notes: src.notes || '', location: src.location || '', startTime: src.startTime || '', endTime: src.endTime || '',
-    startDate: sh(src.startDate), endDate: sh(src.endDate), status: had ? 'confirmed' : 'tentative', seeded: had });
+    clientId: src.clientId || '', startDate: sh(src.startDate), endDate: sh(src.endDate), status: had ? 'confirmed' : 'tentative', seeded: had });
   if (had) {
     d.flights = (src.flights || []).map(f => Object.assign({}, f, { id: uid(), depart: sh(f.depart), arrive: sh(f.arrive), booked: false, checkedIn: false, ref: '', eventId: '', sig: '' }));
     d.stays = (src.stays || []).map(s => Object.assign({}, s, { id: uid(), checkIn: sh(s.checkIn), checkOut: sh(s.checkOut), ref: '', booked: false }));
-    d.legs = (src.legs || []).map(l => Object.assign({}, l, { id: uid(), date: sh(l.date), gar: false, plan: false, handling: false, wx: false,
+    d.legs = (src.legs || []).map(l => Object.assign({}, l, { id: uid(), date: sh(l.date), gar: false, plan: false, handling: false,
       fpDueEventId: '', fpOpenEventId: '', fpSig: '', garDueEventId: '', garOpenEventId: '', garSig: '' }));
     d.tasks = (src.tasks || []).map(t => ({ id: uid(), label: t.label, done: false }));
   }
@@ -1306,12 +1332,12 @@ function garBox(job, l) {
 function renderDir(app) {
   ensureDir();
   const D = S.dir, view = S.dirView;
-  const head = '<header class="bar"><button class="btn ghost" data-act="dir-close">← Jobs</button><b>People &amp; aircraft</b></header>';
-  const tabs = '<nav class="tabs sub">' + [['people', 'People'], ['aircraft', 'Aircraft'], ['settings', 'GAR details']].map(t =>
+  const head = '<header class="bar"><button class="btn ghost" data-act="dir-close">← Jobs</button><b>Setup</b></header>';
+  const tabs = '<nav class="tabs sub">' + [['people', 'People'], ['aircraft', 'Aircraft'], ['settings', 'GAR'], ['clients', 'Clients'], ['biz', 'Invoicing']].map(t =>
     '<div class="tab ' + (view === t[0] ? 'on' : '') + '" data-act="dir-tab" data-view="' + t[0] + '">' + t[1] + '</div>').join('') + '</nav>';
   let body = '';
   if (!D.loaded) body = D.error ? '<p class="fpstat late">' + esc(D.error) + ' <button class="linkbtn" data-act="dir-retry">Try again</button></p>' : '<p class="small">Loading…</p>';
-  else if (S.dirEdit) body = S.dirEdit.kind === 'person' ? personForm(S.dirEdit.rec) : aircraftForm(S.dirEdit.rec);
+  else if (S.dirEdit) body = S.dirEdit.kind === 'person' ? personForm(S.dirEdit.rec) : S.dirEdit.kind === 'client' ? clientForm(S.dirEdit.rec) : aircraftForm(S.dirEdit.rec);
   else if (view === 'people') {
     const row = p => {
       const exp = p.tdExpiry && p.tdExpiry < todayISO();
@@ -1328,6 +1354,13 @@ function renderDir(app) {
   } else if (view === 'aircraft') {
     body = (D.aircraft.map(a => '<button class="card plain" data-act="dir-edit" data-kind="aircraft" data-id="' + a.id + '"><b>' + esc(a.reg) + '</b><div class="small">' + esc([a.type, a.base && 'base ' + a.base, a.reason].filter(Boolean).join(' · ')) + '</div></button>').join('') || '<div class="empty">No aircraft yet.</div>') +
       '<button class="btn primary block" data-act="dir-new" data-kind="aircraft">+ Add an aircraft</button>';
+  } else if (view === 'clients') {
+    body = '<p class="small">Who you invoice. Their email address appears in the suggested message you forward to them.</p>' +
+      ((D.clients || []).map(c => '<button class="card plain" data-act="dir-edit" data-kind="client" data-id="' + c.id + '"><b>' + esc(c.name) + '</b><div class="small">' +
+        esc([c.email, c.rate ? money(c.rate) + '/day' : '', c.terms ? c.terms + '-day terms' : ''].filter(Boolean).join(' \u00B7 ')) + '</div></button>').join('') || '<div class="empty">No clients yet.</div>') +
+      '<button class="btn primary block" data-act="dir-new" data-kind="client">+ Add a client</button>';
+  } else if (view === 'biz') {
+    body = bizForm(D.business || {});
   } else {
     body = '<p class="small">Put on every GAR as the responsible person. The form allows 70 characters for the contact.</p>' +
       fld('Contact number and email', 'id="gsContact" maxlength="70" placeholder="+44 7700 900123 name@example.com"', D.garSettings.contact) +
@@ -1336,6 +1369,24 @@ function renderDir(app) {
   }
   app.innerHTML = head + '<main>' + (S.dirEdit ? '' : tabs) + body + '</main>' +
     '<datalist id="countries">' + COUNTRY_LIST.map(c => '<option value="' + c[0] + '">' + esc(c[1]) + '</option>').join('') + '</datalist>';
+}
+function clientForm(c) {
+  return '<h2 class="sec">' + (c.id ? 'Edit client' : 'New client') + '</h2>' + fld('Name', 'id="cName"', c.name) + fld('Email (the address you forward invoices to)', 'id="cEmail" type="email"', c.email) +
+    fld('Address (on the invoice)', 'id="cAddress"', c.address) +
+    '<div class="grid2">' + fld('Day rate \u00A3 for this client', 'id="cRate" inputmode="decimal"', c.rate || '') + fld('Payment terms, days (blank = usual)', 'id="cTerms" inputmode="numeric"', c.terms || '') + '</div>' +
+    '<p class="small" id="dirErr"></p><button class="btn primary block" data-act="dir-save" data-kind="client">Save</button><button class="btn block" data-act="dir-cancel">Cancel</button>' +
+    (c.id ? '<button class="btn danger block" data-act="dir-delete" data-kind="client" data-id="' + c.id + '">Delete this client</button>' : '');
+}
+function bizForm(b) {
+  return '<p class="small">These appear on your invoices. Saved in your own Google account only. VAT is not added.</p>' +
+    fld('Business name', 'id="bName"', b.name) + fld('Company number (shown on invoices)', 'id="bCoNo" inputmode="numeric"', b.companyNo) + fld('Send invoices to this email (yours – you check them, then forward)', 'id="bReview" type="email" placeholder="Leave blank to use your Google account address"', b.reviewEmail) + fld('Address', 'id="bAddress"', b.address) +
+    '<div class="grid2">' + fld('Email', 'id="bEmail" type="email"', b.email) + fld('Phone', 'id="bPhone"', b.phone) + '</div>' +
+    '<h3>Bank details (for payment)</h3>' + fld('Account name', 'id="bBankName"', b.bankAccountName) +
+    '<div class="grid2">' + fld('Sort code', 'id="bSort" placeholder="00-00-00"', b.sortCode) + fld('Account number', 'id="bAcc" inputmode="numeric"', b.accountNumber) + '</div>' +
+    '<h3>Defaults</h3><p class="small">Day rates are set per client (Setup \u2192 Clients).</p>' + fld('Payment terms (days), unless a client has their own', 'id="bTerms" inputmode="numeric"', b.terms || 30) +
+    '<div class="grid2">' + fld('Invoice number prefix', 'id="bPrefix"', b.prefix === undefined ? 'INV-' : b.prefix) + fld('Next invoice number', 'id="bNext" inputmode="numeric"', b.nextNumber || 1) + '</div>' +
+    fld('Line at the foot of invoices (optional)', 'id="bFooter"', b.footer) +
+    '<button class="btn primary block" data-act="dir-save-biz">Save</button>';
 }
 function personForm(p) {
   const sel = (id, val, opts) => '<select id="' + id + '">' + opts.map(o => '<option' + (o === val ? ' selected' : '') + '>' + o + '</option>').join('') + '</select>';
@@ -1377,6 +1428,11 @@ async function dirSave(kind) {
       if (bad.length) { err.textContent = 'Use the 3-letter country codes from the list (e.g. GBR, FRA, USA).'; return; }
       const saved = await busy(() => api('savePerson', rec));
       S.dir.people = S.dir.people.filter(p => p.id !== saved.id).concat(saved);
+    } else if (kind === 'client') {
+      const rec = Object.assign({}, S.dirEdit.rec, { name: val('cName'), email: val('cEmail'), address: val('cAddress'), rate: val('cRate'), terms: val('cTerms') });
+      if (!rec.name.trim()) { err.textContent = 'A client name is needed.'; return; }
+      const saved = await busy(() => api('saveClient', rec));
+      S.dir.clients = (S.dir.clients || []).filter(c => c.id !== saved.id).concat(saved);
     } else {
       const rec = Object.assign({}, S.dirEdit.rec, { reg: val('aReg'), type: val('aType'), base: val('aBase'), owner: val('aOwner'), reason: val('aReason') });
       if (!rec.reg.trim()) { err.textContent = 'A registration is needed.'; return; }
@@ -1386,6 +1442,170 @@ async function dirSave(kind) {
     S.dirEdit = null; render(); toast('Saved', '');
   } catch (e) { err.textContent = e.message || String(e); }
 }
+// ---------- invoices ----------
+// Invoices live in the pilot's own spreadsheet (see Code.gs). Drafts are editable; once issued they are fixed, and the
+// invoice emails go to the PILOT (never straight to the client); he checks them and forwards them himself.
+const money = n => '£' + (Number(n) || 0).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const dayDiff = (a, b) => Math.round((Date.parse(a) - Date.parse(b)) / 864e5);
+const invState = i => i.status === 'sent' && i.dueDate && i.dueDate < todayISO() ? 'overdue' : i.status;
+const invOverdueDays = i => Math.max(0, dayDiff(todayISO(), i.dueDate));
+const invTotal = e => Math.round(((e.lines || []).reduce((t, l) => t + (parseFloat(l.qty) || 0) * (parseFloat(l.rate) || 0), 0) +
+  (e.expenses || []).reduce((t, x) => t + (parseFloat(x.amount) || 0), 0)) * 100) / 100;
+const jobDays = j => (j.startDate ? Math.max(1, dayDiff(j.endDate || j.startDate, j.startDate) + 1) : 1);
+const clientOf = id => (S.dir.clients || []).find(c => c.id === id);
+// A new invoice for a job: the day-rate line is filled in (days x the client's own day rate), expenses are added by hand.
+function newInvoiceFor(j) {
+  const c = clientOf(j && j.clientId), rate = (c && c.rate) || '';
+  return { id: '', jobId: j ? j.id : '', jobTitle: j ? jobTitle(j) : '', clientId: (j && j.clientId) || '', issueDate: todayISO(), dueDate: '', status: 'draft', number: '', notes: '',
+    lines: [{ auto: !!rate, desc: j ? 'Day rate – ' + jobTitle(j) + (dateRange(j) ? ' (' + dateRange(j).replace(/<[^>]+>/g, '') + ')' : '') : '', qty: j ? jobDays(j) : 1, rate: rate }], expenses: [] };
+}
+function invRow(i) {
+  const st = invState(i);
+  const note = st === 'overdue' ? '<span class="fpstat late">' + invOverdueDays(i) + ' day' + (invOverdueDays(i) === 1 ? '' : 's') + ' overdue</span>'
+    : st === 'sent' ? 'Due ' + esc(fmtDate(i.dueDate)) : st === 'paid' ? 'Paid ' + esc(fmtDate(i.paidAt)) : st === 'void' ? 'Void' : 'Draft';
+  return '<button class="card plain" data-act="inv-open" data-id="' + i.id + '"><div class="cardhead"><b>' + esc(i.number) + ' · ' + esc(i.clientName) + '</b><b>' + money(i.total) + '</b></div>' +
+    '<div class="small">' + esc(i.jobTitle || '') + (i.jobTitle ? ' · ' : '') + note + '</div></button>';
+}
+function invoicesHTML() {
+  const all = (S.invoices || []).slice().sort((a, b) => (b.issueDate || '').localeCompare(a.issueDate || ''));
+  const by = s => all.filter(i => invState(i) === s);
+  const grp = (title, list) => list.length ? '<h2 class="sec">' + title + ' <small>' + list.length + '</small></h2>' + list.map(invRow).join('') : '';
+  const owed = all.filter(i => i.status === 'sent').reduce((t, i) => t + i.total, 0);
+  return '<button class="btn primary block" data-act="inv-new">+ New invoice</button>' +
+    (owed ? '<p class="small">Waiting to be paid: <b>' + money(owed) + '</b></p>' : '') +
+    (all.length ? grp('Overdue', by('overdue')) + grp('Awaiting payment', by('sent')) + grp('Drafts', by('draft')) + grp('Paid', by('paid').slice(0, 15)) + grp('Void', by('void').slice(0, 5))
+      : '<div class="empty">No invoices yet.<br><span class="small">Tap + New invoice, or open a job and choose “Create invoice”.</span></div>');
+}
+// the "Invoices" box on a job
+function jobInvoiceBox(j) {
+  const mine = (S.invoices || []).filter(i => i.jobId === j.id);
+  const noClients = S.dir.loaded && !(S.dir.clients || []).length;
+  return '<div class="sect"><h3>' + INV_ICON + ' Invoice</h3>' + (mine.map(invRow).join('') || '<p class="small">No invoice yet for this job.</p>') +
+    '<button class="btn" data-act="inv-new" data-job="' + j.id + '">Create invoice for this job</button>' +
+    (noClients ? '<p class="small">Add a client first under Setup → Clients.</p>' : '') + '</div>';
+}
+function clientSelect(j) {
+  if (!S.dir.loaded) { ensureDir(); }
+  const cl = S.dir.clients || [];
+  return '<label class="fld"><span>Client (for invoicing)</span><select data-f="clientId"><option value="">' + (S.dir.loaded ? 'No client' : 'Loading…') + '</option>' +
+    cl.map(c => '<option value="' + c.id + '"' + (j.clientId === c.id ? ' selected' : '') + '>' + esc(c.name) + '</option>').join('') + '</select></label>';
+}
+function renderInvoice(app) {
+  ensureDir();
+  const e = S.invEdit;
+  if (!e) { S.openId = null; return render(); }
+  const head = '<header class="bar"><button class="btn ghost" data-act="inv-close">← Back</button><b>' + (e.number ? esc(e.number) : 'New invoice') + '</b>' +
+    (e.status !== 'draft' ? '<span class="badge ' + (e.status === 'paid' ? 'confirmed' : 'tentative') + '">' + esc(invState(e)) + '</span>' : '') + '</header>';
+  const dis = e.status !== 'draft';
+  const cl = S.dir.clients || [];
+  if (!S.dir.loaded) return void (app.innerHTML = head + '<main class="detail"><p class="small">' + (S.dir.error ? esc(S.dir.error) : 'Loading…') + '</p></main>');
+  let body;
+  if (dis) {
+    const rows = e.lines.map(l => '<tr><td>' + esc(l.desc) + '</td><td>' + esc(l.qty) + ' × ' + money(l.rate) + '</td><td>' + money(l.amount) + '</td></tr>').join('') +
+      e.expenses.map(x => '<tr><td>' + esc(x.desc) + ' <small>(expense)</small></td><td></td><td>' + money(x.amount) + '</td></tr>').join('');
+    body = '<p><b>' + esc(e.clientName) + '</b><br><span class="small">' + esc(e.clientEmail || 'no email address') + '</span></p>' +
+      '<p class="small">Issued ' + esc(fmtDate(e.issueDate)) + ' · due ' + esc(fmtDate(e.dueDate)) + (e.paidAt ? ' · paid ' + esc(fmtDate(e.paidAt)) : '') + '</p>' +
+      '<table class="invt">' + rows + '<tr><th colspan="2">Total</th><th>' + money(e.total) + '</th></tr></table>' +
+      ((e.reminders || []).length ? '<p class="small">Reminders drafted: ' + e.reminders.map(r => esc(fmtDate(r.at))).join(', ') + '</p>' : '');
+  } else {
+    body = '<label class="fld"><span>Client</span><select data-iv="clientId"><option value="">Choose a client…</option>' +
+      cl.map(c => '<option value="' + c.id + '"' + (e.clientId === c.id ? ' selected' : '') + '>' + esc(c.name) + '</option>').join('') + '</select></label>' +
+      (cl.length ? '' : '<p class="small">No clients yet. Add one under Setup → Clients.</p>') +
+      '<div class="grid2">' + fld('Invoice date', 'data-iv="issueDate"', e.issueDate, 'date') + fld('Due date (blank = usual terms)', 'data-iv="dueDate"', e.dueDate, 'date') + '</div>' +
+      '<h3>Fees</h3>' + e.lines.map((l, k) => '<div class="ivrow" data-k="lines" data-i="' + k + '">' + fld('Description', 'data-iv="desc"', l.desc) +
+        '<div class="grid3">' + fld('Days / qty', 'data-iv="qty" inputmode="decimal"', l.qty) + fld('Rate £', 'data-iv="rate" inputmode="decimal"', l.rate) +
+        '<div class="fld"><span>Amount</span><div class="amt" data-amt>' + money((parseFloat(l.qty) || 0) * (parseFloat(l.rate) || 0)) + '</div></div></div>' +
+        '<button class="linkbtn" data-act="inv-rm" data-k="lines" data-i="' + k + '">Remove</button></div>').join('') +
+      '<button class="btn" data-act="inv-add" data-k="lines">+ Add a fee line</button>' +
+      '<h3>Expenses passed on to the client</h3>' + e.expenses.map((x, k) => '<div class="ivrow" data-k="expenses" data-i="' + k + '">' + fld('What for', 'data-iv="desc"', x.desc) +
+        '<div class="grid2">' + fld('Amount £', 'data-iv="amount" inputmode="decimal"', x.amount) + '<div class="fld"><span>&nbsp;</span><button class="linkbtn" data-act="inv-rm" data-k="expenses" data-i="' + k + '">Remove</button></div></div></div>').join('') +
+      '<button class="btn" data-act="inv-add" data-k="expenses">+ Add an expense</button>' +
+      '<p class="invtotal">Total <b id="ivTotal">' + money(invTotal(e)) + '</b></p>' +
+      '<label class="fld"><span>Note on the invoice (optional)</span><textarea data-iv="notes" rows="2">' + esc(e.notes) + '</textarea></label>' +
+      (e.draftId ? '<p class="small">This invoice was already emailed to you. If you change anything, email it to yourself again and use the new one.</p>' : '');
+  }
+  const st = invState(e), id = e.id;
+  const btn = (act, txt, cls) => '<button class="btn ' + (cls || '') + ' block" data-act="' + act + '">' + txt + '</button>';
+  let acts = '';
+  if (dis) {
+    acts = btn('inv-pdf', 'Download PDF') +
+      (e.status === 'sent' ? btn('inv-gmail', 'Email me a payment reminder to forward', st === 'overdue' ? 'primary' : '') + btn('inv-paid', 'Mark as paid', 'good') : '') +
+      (e.status === 'paid' ? btn('inv-unpaid', 'Mark as not paid') : '') +
+      (e.status !== 'void' ? btn('inv-void', 'Void this invoice', 'danger') : '');
+  } else {
+    acts = btn('inv-save', 'Save', 'primary') + btn('inv-gmail', 'Email me this invoice to check and forward') + btn('inv-pdf', 'Download PDF') +
+      (id ? btn('inv-sent', 'I’ve sent it – mark as sent', 'good') + btn('inv-del', 'Delete this draft', 'danger') : '');
+  }
+  app.innerHTML = head + '<main class="detail">' + (e.jobTitle ? '<p class="small">Job: ' + esc(e.jobTitle) + '</p>' : '') + body + '<p class="small" id="ivErr" style="color:var(--danger)"></p>' + acts +
+    (dis ? '' : '<p class="small">The email comes to you (see Setup → Invoicing), not to the client. Check it, then forward it yourself – nothing reaches the client until you do.</p>') + '</main>';
+}
+// edits to the invoice form (no redraw while typing)
+document.addEventListener('input', e => {
+  const el = e.target;
+  if (!el.dataset || el.dataset.iv === undefined || !S.invEdit) return;
+  const row = el.closest('.ivrow'), k = el.dataset.iv;
+  if (row) {
+    const it = S.invEdit[row.dataset.k][+row.dataset.i]; if (!it) return;
+    it[k] = el.value; if (k === 'rate') delete it.auto;
+    const amt = row.querySelector('[data-amt]'); if (amt) amt.textContent = money((parseFloat(it.qty) || 0) * (parseFloat(it.rate) || 0));
+  } else S.invEdit[k] = el.value;
+  const t = $('#ivTotal'); if (t) t.textContent = money(invTotal(S.invEdit));
+  if (k === 'clientId') {   // the client's own rate, if set, replaces an empty rate
+    const c = clientOf(el.value), r = (c && c.rate) || '';   // each client has their own day rate: refill rates that came from a client, never ones typed by hand
+    S.invEdit.lines.forEach(l => { if (l.auto || !l.rate) { l.rate = r; l.auto = !!r; } }); render();
+  }
+});
+document.addEventListener('change', e => { if (e.target.dataset && e.target.dataset.iv === 'clientId' && S.invEdit) render(); });
+function invPayload() {
+  const e = S.invEdit;
+  return { id: e.id, jobId: e.jobId, jobTitle: e.jobTitle, clientId: e.clientId, issueDate: e.issueDate, dueDate: e.dueDate, notes: e.notes,
+    lines: e.lines.filter(l => (l.desc || '').trim() || parseFloat(l.qty) * parseFloat(l.rate)), expenses: e.expenses.filter(x => (x.desc || '').trim() || parseFloat(x.amount)) };
+}
+const copy = o => JSON.parse(JSON.stringify(o));
+async function invSaveNow() {
+  if (S.invEdit.status !== 'draft') return S.invEdit;
+  if (!S.invEdit.clientId) throw new Error('Choose a client first.');
+  const saved = await api('saveInvoice', invPayload());
+  S.invoices = (S.invoices || []).filter(i => i.id !== saved.id).concat(saved); S.invEdit = copy(saved); return saved;
+}
+function invSet(saved) { S.invoices = (S.invoices || []).filter(i => i.id !== saved.id).concat(saved); S.invEdit = copy(saved); }
+async function afterInvChange() { const keep = S.invEdit && S.invEdit.id; await load(); if (keep) { const i = (S.invoices || []).find(x => x.id === keep); if (i) S.invEdit = copy(i); } render(); }   // tasks on the job were ticked server-side
+function b64blob(b64, type) { const bin = atob(b64), a = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i); return new Blob([a], { type }); }
+const invFail = e => { const el = $('#ivErr'); const m = e.message || String(e); if (el) el.textContent = m; else toast(m, 'err'); };
+Object.assign(actions, {
+  'inv-new'(t) { const j = t.dataset.job ? findJob(t.dataset.job) : null; ensureDir(); S.invEdit = newInvoiceFor(j); S.openId = 'inv'; window.scrollTo(0, 0); render(); },
+  'inv-open'(t) { const i = (S.invoices || []).find(x => x.id === t.dataset.id); if (!i) return; ensureDir(); S.invEdit = copy(i); S.openId = 'inv'; window.scrollTo(0, 0); render(); },
+  'inv-close'() { S.openId = null; S.invEdit = null; render(); },
+  'inv-add'(t) { S.invEdit[t.dataset.k].push(t.dataset.k === 'lines' ? { desc: '', qty: 1, rate: '' } : { desc: '', amount: '' }); render(); },
+  'inv-rm'(t) { S.invEdit[t.dataset.k].splice(+t.dataset.i, 1); render(); },
+  'inv-save'() { busy(invSaveNow).then(() => { render(); toast('Saved', ''); }).catch(invFail); },
+  'inv-pdf'() {
+    busy(async () => { const s = await invSaveNow(); const r = await api('getInvoicePdf', s.id); const a = document.createElement('a'); a.href = URL.createObjectURL(b64blob(r.base64, 'application/pdf')); a.download = r.name; document.body.appendChild(a); a.click(); a.remove(); render(); }).catch(invFail);
+  },
+  'inv-gmail'() {
+    const reminder = S.invEdit.status !== 'draft';
+    busy(async () => { const s = await invSaveNow(); const r = await api('emailInvoice', s.id, reminder ? 'reminder' : 'invoice'); invSet(r.invoice); render();
+      toast('Emailed to you at ' + r.sentTo + ' – check it, then forward it to the client.', ''); }).catch(invFail);
+  },
+  'inv-sent'() { busy(async () => { await invSaveNow(); invSet(await api('setInvoiceStatus', S.invEdit.id, 'sent')); await afterInvChange(); toast('Marked as sent', ''); }).catch(invFail); },
+  'inv-paid'() { busy(async () => { invSet(await api('setInvoiceStatus', S.invEdit.id, 'paid', todayISO())); await afterInvChange(); toast('Marked as paid', ''); }).catch(invFail); },
+  'inv-unpaid'() { busy(async () => { invSet(await api('setInvoiceStatus', S.invEdit.id, 'unpaid')); await afterInvChange(); }).catch(invFail); },
+  async 'inv-void'() { if (!await askConfirm('Void this invoice?', 'It is kept for your records but no longer counts as owed. The number is not reused.', 'Void', true)) return;
+    busy(async () => { invSet(await api('setInvoiceStatus', S.invEdit.id, 'void')); await afterInvChange(); }).catch(invFail); },
+  async 'inv-del'() { if (!await askConfirm('Delete this draft?', 'Only drafts can be deleted.', 'Delete', true)) return;
+    busy(async () => { await api('deleteInvoice', S.invEdit.id); S.invoices = S.invoices.filter(i => i.id !== S.invEdit.id); S.invEdit = null; S.openId = null; render(); }).catch(invFail); },
+  'inv-remind'(t) {     // from the To do tab
+    busy(async () => { const r = await api('emailInvoice', t.dataset.id, 'reminder'); S.invoices = S.invoices.filter(i => i.id !== r.invoice.id).concat(r.invoice); render();
+      toast('Reminder emailed to you at ' + r.sentTo + ' – check it, then forward it to the client.', ''); }).catch(e => toast(e.message || String(e), 'err'));
+  }
+});
+// invoices that need chasing: issued, past their due date, and no reminder drafted in the last 7 days
+function chaseItems() {
+  return (S.invoices || []).filter(i => i.status === 'sent' && i.dueDate && i.dueDate < todayISO() &&
+    !(i.reminders || []).some(r => dayDiff(todayISO(), r.at) < 7)).map(i => ({ cat: 'chase', invoice: i, date: i.dueDate,
+    label: 'Chase payment: ' + i.number, detail: i.number + ' · ' + i.clientName }));
+}
+
 // ---------- import jobs from a spreadsheet (.xlsx / .csv, made from the template) ----------
 // The file is read in this browser (SheetJS, loaded from cdnjs only when needed); nothing is sent anywhere
 // except the finished jobs, which go to your own Apps Script exactly like jobs typed in by hand.
@@ -1534,7 +1754,7 @@ async function importGo() {
   S.imp = null; S.openId = null; S.tab = 'active'; render();
   toast('Imported ' + done + ' job' + (done === 1 ? '' : 's') + ' – confirmed ones are on your calendar', '');
 }
-if (window.PILOT_MOCK) window.PILOT_TEST = { parseImport, cellDate, cellTime, importFile, garData, fillGarXlsx, sortedPeople };   // lets the automated tests reach the import helpers
+if (window.PILOT_MOCK) window.PILOT_TEST = { newInvoiceFor, invTotal, chaseItems, invState, parseImport, cellDate, cellTime, importFile, garData, fillGarXlsx, sortedPeople };   // lets the automated tests reach the import helpers
 document.addEventListener('change', e => {
   const el = e.target;
   if (el.dataset && el.dataset.addperson && el.value && S.openId) {            // add a crew member / passenger to a leg
@@ -1555,7 +1775,7 @@ async function load(fromConnect) {
   }
   try {
     const r = await api('getAll');
-    S.active = r.active; S.archive = r.archive; S.appUrl = r.appUrl;
+    S.active = r.active; S.archive = r.archive; S.appUrl = r.appUrl; S.invoices = r.invoices || [];
     S.active.concat(S.archive).forEach(j => { (j.legs || []).forEach(splitLeg); (j.flights || []).forEach(fixTravel); });
     S.calendarName = r.calendarName; S.reminders = r.reminderMinutes; S.colours = r.colours;
     S.loaded = true; S.error = ''; S.needConnect = false; S.connectError = '';
