@@ -11,13 +11,34 @@ A simple job tracker and checklist for a freelance general aviation pilot, for u
 
 <sub>Screenshots use invented sample data.</sub>
 
-## What it does
+## Features
 
-- Tracks **tentative** jobs (orange in Google Calendar) and **confirmed** jobs (green). Cancelled jobs are archived and can be restored.
-- Gives each confirmed job a checklist: GAR, flight plan and handling for each leg; outbound and return travel (flight, train or driving); accommodation; and post-flight tasks.
-- Calculates GAR and flight plan deadlines and sets calendar reminders.
-- Fills in the Home Office GAR spreadsheet from saved people and aircraft.
-- Creates invoices as PDFs, emails them to the pilot to check and forward, and prompts for overdue payments.
+**Jobs and calendar**
+- **Tentative and confirmed jobs:** tentative jobs show orange in Google Calendar and confirmed jobs show green. Cancelled jobs are archived and can be restored, or duplicated as a template for a repeat job.
+- **Date clash warnings:** if a job's dates overlap another active job, the app warns but never blocks. Two confirmed jobs overlapping get a firm warning. Anything involving a tentative job gets a gentle heads-up, since holding two tentative dates is normal. Jobs without times count as all day, and a drive that starts the evening before counts as part of the job.
+- **Import:** jobs can be added in bulk from a spreadsheet using the included template.
+
+**Checklist for each confirmed job**
+- **Legs:** GAR, flight plan and handling for each leg, with the From and To airports (ICAO codes) used to work out the GAR country.
+- **Travel:** outbound and return by ✈️ flight, 🚆 train, 🚗 driving or other. Driving time is blocked out on the calendar, and commercial flights get a 24-hour check-in reminder.
+- **Accommodation and post-flight tasks:** 🏨 stays, then 🧾 invoice and 💷 expense tasks, including a check that each has been paid.
+- **To do tab:** everything outstanding across all jobs, sorted by date or by task.
+
+**Deadlines and reminders**
+- **GAR and flight plan deadlines:** calculated from the UK and French rules and added to the calendar, with popup reminders to the pilot's phone.
+
+**GAR paperwork**
+- **People and aircraft:** saved once, with regular passengers listed first for each aircraft.
+- **Bulk-add people:** from the people list downloaded from the UK GAR service. Anyone already saved is topped up, not overwritten.
+- **GAR file:** the Home Office GAR spreadsheet is filled in from the saved details.
+
+**Invoicing**
+- **Per-client day rates:** invoices are built from the job days, plus fees and expenses passed on to the client.
+- **PDFs, no accidental sending:** each invoice is a PDF emailed to the pilot to check and forward, so nothing reaches a client without your seeing it.
+- **Overdue payments:** a chase item and a ready-written reminder, firmer the later the payment.
+
+**Everyday use**
+- **Phone or laptop:** installable on a home screen, with large type. Use it on your laptop for entering details or looking at things on a larger screen, have it in your pocket and on the go on, ready on your phone.
 
 ## How it fits together
 
