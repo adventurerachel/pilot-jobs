@@ -129,6 +129,7 @@ input,textarea,select{width:100%;font:inherit;padding:10px 12px;border:1px solid
 textarea{resize:vertical}
 input[type=checkbox]{width:24px;height:24px;min-height:0;flex:none;accent-color:var(--conf);margin:0}
 input[type=text]:not([data-nocaps]),input:not([type]):not([data-nocaps]),textarea:not([data-nocaps]){text-transform:uppercase}
+.clashtag{color:var(--warn,#b45309);margin-top:4px}.clashtag.hard{color:var(--danger,#b91c1c);font-weight:600}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
 .ivrow{border-top:1px solid var(--line);padding-top:6px;margin-top:8px}
@@ -633,7 +634,7 @@ function card(j) {
   }
   return '<article class="card ' + j.status + '" data-act="open" data-id="' + j.id + '" tabindex="0">' +
     '<div class="cardhead"><p class="t">' + esc(jobTitle(j)) + '</p><span class="badge ' + j.status + '">' + j.status + '</span></div>' +
-    '<div class="meta">' + meta + '</div>' + sub + '</article>';
+    '<div class="meta">' + meta + '</div>' + (arch ? '' : clashTag(j)) + sub + '</article>';
 }
 
 function renderList(app) {
@@ -769,7 +770,7 @@ function renderDetail(app) {
       '<button class="btn" data-act="duplicate">Duplicate as new job</button>' +
       '<button class="btn danger" data-act="cancel">Cancel job</button></div>';
   }
-  app.innerHTML = head + '<main class="detail">' +
+  app.innerHTML = head + '<main class="detail"><div id="clashBox">' + clashHTML(j) + '</div>' +
     '<span class="badge ' + j.status + '">' + j.status + '</span>' +
     fld('Title', 'data-f="title"', j.title) +
     fld('Route / locations', 'data-f="location" placeholder="e.g. EGKB - LFMN - EGKB"', j.location) +
@@ -827,7 +828,7 @@ function renderNew(app) {
       notes + checklistHTML(j);
   }
   app.innerHTML = '<header class="bar"><button class="btn ghost" data-act="back">← Cancel</button><b>New job</b></header>' +
-    '<main class="detail">' + (j.copyNote ? '<p class="fpstat info">' + esc(j.copyNote) + '</p>' : '') + tick + body + clientSelect(j) +
+    '<main class="detail">' + (j.copyNote ? '<p class="fpstat info">' + esc(j.copyNote) + '</p>' : '') + tick + '<div id="clashBox">' + clashHTML(j) + '</div>' + body + clientSelect(j) +
     '<p class="small" id="newErr" style="color:var(--danger)"></p>' +
     '<div class="actions"><button class="btn ' + (conf ? 'good' : 'primary') + '" data-act="save-new">' + (conf ? 'Save confirmed job' : 'Save tentative job') + '</button></div>' +
     '<p class="small">' + (conf ? 'Goes on the calendar in green. Commercial flights with departure times get check-in reminders, and flight plan / GAR deadlines get their own events.'
@@ -1058,7 +1059,9 @@ const actions = {
   },
   async confirm() {
     const j = findJob(S.openId);
-    if (!await askConfirm('Confirm this job?', 'It will turn ' + S.colours.confirmed + ' on the calendar and the booking checklist will appear.', 'Confirm job', false)) return;
+    const hardNames = clashesFor(Object.assign({}, j, { status: 'confirmed' })).filter(c => c.hard).map(clashName);
+    if (!await askConfirm('Confirm this job?', 'It will turn ' + S.colours.confirmed + ' on the calendar and the booking checklist will appear.' +
+      (hardNames.length ? ' \u26A0\uFE0F It clashes with another confirmed job: ' + hardNames.join('; ') + '.' : ''), 'Confirm job', false)) return;
     await busy(async () => {
       try {
         await flush(j.id);
@@ -1127,6 +1130,8 @@ async function saveDraft() {
   ['title', 'notes', 'location', 'startDate', 'startTime', 'endDate', 'endTime'].forEach(k => { data[k] = String(j[k] || '').trim(); });
   data.clientId = j.clientId || '';
   if (conf) ['flights', 'stays', 'legs', 'tasks'].forEach(k => { data[k] = j[k]; });
+  const hard = conf ? clashesFor(j).filter(c => c.hard) : [];
+  if (hard.length && !await askConfirm('Clashes with a confirmed job', 'These dates overlap ' + hard.map(clashName).join('; ') + '. Save it anyway?', 'Save anyway', false)) return;
   await busy(async () => {
     try {
       const job = await api('createJob', data);
@@ -1452,6 +1457,36 @@ async function dirSave(kind) {
     S.dirEdit = null; render(); toast('Saved', '');
   } catch (e) { err.textContent = e.message || String(e); }
 }
+// ---------- date clashes ----------
+// A job runs from its start to its end (all day when no times are given); a drive that starts earlier or finishes later widens it.
+// Two confirmed jobs on top of each other get a firm warning; anything involving a tentative job gets a gentle heads-up. Nothing is blocked.
+function driveEndISO(f) {
+  const a = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(f.depart || ''), b = /^(\d{2}):(\d{2})$/.exec(f.driveTime || '');
+  if (!a || !b) return '';
+  return new Date(Date.UTC(+a[1], a[2] - 1, +a[3], +a[4], +a[5]) + (+b[1] * 60 + +b[2]) * 60000).toISOString().slice(0, 16);
+}
+function spanOf(j) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(j.startDate || '')) return null;
+  let s = j.startDate + 'T' + (j.startTime || '00:00'), e = (j.endDate || j.startDate) + 'T' + (j.endTime || '23:59');
+  if (e < s) e = s;
+  (j.flights || []).forEach(f => { if (travelMode(f) === 'car' && f.depart && driveEndISO(f)) { if (f.depart < s) s = f.depart; if (driveEndISO(f) > e) e = driveEndISO(f); } });
+  return { s, e };
+}
+function clashesFor(j) {
+  const a = spanOf(j); if (!a || !j.status || isArchived(j)) return [];
+  return S.active.filter(o => o !== j && o.id !== j.id && spanOf(o)).filter(o => { const b = spanOf(o); return a.s < b.e && b.s < a.e; })
+    .map(o => ({ job: o, hard: o.status === 'confirmed' && j.status === 'confirmed' }));
+}
+const clashName = c => jobTitle(c.job) + ' (' + c.job.status + (dateRange(c.job) ? ', ' + dateRange(c.job) : '') + ')';
+function clashHTML(j) {
+  const cl = clashesFor(j); if (!cl.length) return '';
+  const hard = cl.filter(c => c.hard), soft = cl.filter(c => !c.hard);
+  return (hard.length ? '<div class="fpstat late">⚠️ Clashes with another confirmed job: ' + hard.map(c => esc(clashName(c))).join('; ') + '.</div>' : '') +
+    (soft.length ? '<div class="fpstat info">Heads-up: these dates overlap ' + soft.map(c => esc(clashName(c))).join('; ') + '. Fine if it’s deliberate.</div>' : '');
+}
+const clashTag = j => { const cl = clashesFor(j); return cl.length ? '<div class="small clashtag' + (cl.some(c => c.hard) ? ' hard' : '') + '">' + (cl.some(c => c.hard) ? '⚠️ Clashes with ' : 'Overlaps ') + esc(jobTitle(cl[0].job)) + (cl.length > 1 ? ' +' + (cl.length - 1) : '') + '</div>' : ''; };
+function refreshClash() { const el = $('#clashBox'), j = S.openId && findJob(S.openId); if (el && j) el.innerHTML = clashHTML(j); }
+['input', 'change'].forEach(ev => document.addEventListener(ev, e => { if (e.target.dataset && /^(startDate|endDate|startTime|endTime|depart|driveTime|mode)$/.test(e.target.dataset.f || '')) setTimeout(refreshClash, 0); }));
 // ---------- invoices ----------
 // Invoices live in the pilot's own spreadsheet (see Code.gs). Drafts are editable; once issued they are fixed, and the
 // invoice emails go to the PILOT (never straight to the client); he checks them and forwards them himself.
@@ -1831,7 +1866,7 @@ async function importGo() {
   S.imp = null; S.openId = null; S.tab = 'active'; render();
   toast('Imported ' + done + ' job' + (done === 1 ? '' : 's') + ' – confirmed ones are on your calendar', '');
 }
-if (window.PILOT_MOCK) window.PILOT_TEST = { parseGarPeople, splitDelimited, newInvoiceFor, invTotal, chaseItems, invState, parseImport, cellDate, cellTime, importFile, garData, fillGarXlsx, sortedPeople };   // lets the automated tests reach the import helpers
+if (window.PILOT_MOCK) window.PILOT_TEST = { clashesFor, spanOf, parseGarPeople, splitDelimited, newInvoiceFor, invTotal, chaseItems, invState, parseImport, cellDate, cellTime, importFile, garData, fillGarXlsx, sortedPeople };   // lets the automated tests reach the import helpers
 document.addEventListener('change', e => {
   const el = e.target;
   if (el.dataset && el.dataset.addperson && el.value && S.openId) {            // add a crew member / passenger to a leg
