@@ -38,7 +38,7 @@ A simple job tracker and checklist for a freelance general aviation pilot, for u
 - **Overdue payments:** a chase item and a ready-written reminder, firmer the later the payment.
 
 **Everyday use**
-- **Phone or laptop:** installable on a home screen, with large type. Use it on your laptop for entering details or looking at things on a larger screen, have it in your pocket and on the go on, ready on your phone.
+- **Phone or laptop:** installable on a home screen, with large type. Use it on your laptop for entering details or looking at things on a larger screen, and have it in your pocket and ready to go on your phone.
 
 ## How it fits together
 
