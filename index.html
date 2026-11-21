@@ -590,6 +590,7 @@ async function doSave(id) {
   if (s.inflight) { s.dirty = true; return; }
   const j = findJob(id);
   if (!j || isArchived(j)) return;
+  if (jobErrors(j).length) { s.dirty = false; setChip('error'); refreshClash(); return; }   // the banner says why; saving resumes once it is fixed
   s.inflight = true; s.dirty = false;
   setChip('saving');
   try {
@@ -690,6 +691,8 @@ function flightHTML(f) {
       '<p class="small" data-hint>' + esc(flightHint(f)) + '</p></div>' : '') +
     '</div>';
 }
+const outFor = (a, b) => !a ? '' : addDaysISO(a, Math.max(1, nightsBetween(a, b) || 0));   // check-out = check-in + nights, at least 1
+const outNote = s => s.checkIn && s.checkOut ? 'Check-out: ' + fmtDate(s.checkOut) : 'Enter the check-in date and the number of nights; the check-out date is worked out for you.';
 function stayHTML(s) {
   const open = UI.open.has(s.id);
   return '<div class="item ' + (s.booked ? 'done' : '') + '" data-list="stays" data-id="' + s.id + '">' +
@@ -698,7 +701,8 @@ function stayHTML(s) {
     '<span class="sum" data-sum>' + esc(itemSummary('stays', s)) + '</span></button>' +
     '<button class="icon sm" data-act="del" aria-label="Remove">\u2715</button></div>' +
     (open ? '<div class="item-b">' + fld('Location / hotel', 'data-f="location" placeholder="e.g. Nice"', s.location) +
-      '<div class="grid2">' + fld('Check-in', 'data-f="checkIn"', s.checkIn, 'date') + fld('Check-out', 'data-f="checkOut"', s.checkOut, 'date') + '</div>' +
+      '<div class="grid2">' + fld('Check-in', 'data-f="checkIn"', s.checkIn, 'date') + fld('Nights', 'data-f="nights" inputmode="numeric" min="1" max="365" step="1" placeholder="e.g. 2"', nightsBetween(s.checkIn, s.checkOut) || '', 'number') + '</div>' +
+      '<p class="small" data-outnote>' + esc(outNote(s)) + '</p>' +
       fld('Booking ref / notes', 'data-f="ref"', s.ref) + '</div>' : '') +
     '</div>';
 }
@@ -770,13 +774,13 @@ function renderDetail(app) {
       '<button class="btn" data-act="duplicate">Duplicate as new job</button>' +
       '<button class="btn danger" data-act="cancel">Cancel job</button></div>';
   }
-  app.innerHTML = head + '<main class="detail"><div id="clashBox">' + clashHTML(j) + '</div>' +
+  app.innerHTML = head + '<main class="detail"><div id="clashBox">' + checksHTML(j) + '</div>' +
     '<span class="badge ' + j.status + '">' + j.status + '</span>' +
     fld('Title', 'data-f="title"', j.title) +
     fld('Route / locations', 'data-f="location" placeholder="e.g. EGKB - LFMN - EGKB"', j.location) +
     '<div class="grid2">' + fld('Start date', 'data-f="startDate"', j.startDate, 'date') + fld('End date', 'data-f="endDate"', j.endDate, 'date') + '</div>' +
     '<div class="grid2">' + fld('Start time', 'data-f="startTime"', j.startTime, 'time') + fld('End time', 'data-f="endTime"', j.endTime, 'time') + '</div>' +
-    clientSelect(j) +
+    (j.status === 'tentative' ? tentLegs(j) : '') + clientSelect(j) +
     '<label class="fld"><span>Notes</span><textarea data-nocaps data-f="notes" rows="5">' + esc(j.notes) + '</textarea></label>' +
     '<p class="small" id="calstate">' + calState(j) + '</p>' +
     (j.status === 'tentative' ? actions : '') +
@@ -796,7 +800,7 @@ function seedDraft(j) {            // the starting checklist for a confirmed job
   if (j.seeded) return;
   j.seeded = true;
   j.flights = [newFlight('out'), newFlight('return')];
-  j.stays = [{ id: uid(), location: '', checkIn: j.startDate, checkOut: j.endDate, ref: '', booked: false }];
+  j.stays = [{ id: uid(), location: '', checkIn: j.startDate, checkOut: outFor(j.startDate, j.endDate), ref: '', booked: false }];
   j.legs = [newLeg(j.startDate)];
   j.tasks = POST_FLIGHT_TASKS();
   UI.open.add(j.flights[0].id); UI.open.add(j.stays[0].id);
@@ -819,7 +823,7 @@ function renderNew(app) {
       '<div class="grid2">' + fld('Start date', 'data-f="startDate"', j.startDate, 'date') + fld('End date', 'data-f="endDate"', j.endDate, 'date') + '</div>' +
       '<details' + (j.startTime || j.endTime ? ' open' : '') + '><summary>Add times (optional)</summary><div class="grid2">' +
       fld('Start time', 'data-f="startTime"', j.startTime, 'time') + fld('End time', 'data-f="endTime"', j.endTime, 'time') + '</div>' +
-      '<p class="small">With both times the calendar entry is timed; otherwise it is an all-day entry and the times appear in its description.</p></details>';
+      '<p class="small">With both times the calendar entry is timed; otherwise it is an all-day entry and the times appear in its description.</p></details>' + tentLegs(j);
   } else {
     body = fld('Title', 'data-f="title" placeholder="Defaults to the first line of your notes"', j.title) +
       fld('Route / locations', 'data-f="location" placeholder="e.g. EGKB - LFMN - EGKB"', j.location) +
@@ -828,7 +832,7 @@ function renderNew(app) {
       notes + checklistHTML(j);
   }
   app.innerHTML = '<header class="bar"><button class="btn ghost" data-act="back">← Cancel</button><b>New job</b></header>' +
-    '<main class="detail">' + (j.copyNote ? '<p class="fpstat info">' + esc(j.copyNote) + '</p>' : '') + tick + '<div id="clashBox">' + clashHTML(j) + '</div>' + body + clientSelect(j) +
+    '<main class="detail">' + (j.copyNote ? '<p class="fpstat info">' + esc(j.copyNote) + '</p>' : '') + tick + '<div id="clashBox">' + checksHTML(j) + '</div>' + body + clientSelect(j) +
     '<p class="small" id="newErr" style="color:var(--danger)"></p>' +
     '<div class="actions"><button class="btn ' + (conf ? 'good' : 'primary') + '" data-act="save-new">' + (conf ? 'Save confirmed job' : 'Save tentative job') + '</button></div>' +
     '<p class="small">' + (conf ? 'Goes on the calendar in green. Commercial flights with departure times get check-in reminders, and flight plan / GAR deadlines get their own events.'
@@ -908,13 +912,20 @@ function onField(e) {
   if (itemEl) {
     const it = j[itemEl.dataset.list].find(x => x.id === itemEl.dataset.id);
     if (!it) return;
+    const prevNights = itemEl.dataset.list === 'stays' ? nightsBetween(it.checkIn, it.checkOut) : 0;
     it[el.dataset.f] = val;
+    if (itemEl.dataset.list === 'stays') {   // the check-out date is never typed: it is check-in plus the number of nights, so it can't come before check-in
+      const f = el.dataset.f;
+      if (f === 'nights') { delete it.nights; const n = parseInt(val, 10); it.checkOut = it.checkIn && n > 0 ? addDaysISO(it.checkIn, Math.min(n, 365)) : ''; }
+      else if (f === 'checkIn') it.checkOut = val ? addDaysISO(val, prevNights || 1) : '';
+      const on = itemEl.querySelector('[data-outnote]'); if (on) on.textContent = outNote(it);
+    }
     if (itemEl.dataset.list === 'flights' && el.dataset.f === 'mode') { it.commercial = val === 'flight'; refreshDerived(j); scheduleSave(j.id, 250); render(); return; }
     if (itemEl.dataset.list === 'legs') {
       const f = el.dataset.f;
       if (f === 'from' || f === 'to') {
         const up = String(val).toUpperCase().replace(/[^A-Z]/g, ''); if (up !== val) el.value = up;
-        it[f] = up; it.route = joinRoute(it);
+        it[f] = up; it.route = joinRoute(it); if (j.status === 'tentative') syncLocFromLegs(j);
         if (f === 'to' && icaoCountry(up)) {            // a new destination: infer the country again
           it.dest = icaoCountry(up); it.destManual = false;
           const sel = itemEl.querySelector('[data-f=dest]'); if (sel) sel.value = it.dest;
@@ -1049,9 +1060,13 @@ const actions = {
   'add-stay'() {
     const j = findJob(S.openId);
     const last = j.stays[j.stays.length - 1];
-    addItem('stays', { id: uid(), location: '', checkIn: last ? last.checkOut : j.startDate, checkOut: '', ref: '', booked: false });
+    const cin = last ? last.checkOut : j.startDate;
+    addItem('stays', { id: uid(), location: '', checkIn: cin, checkOut: cin ? addDaysISO(cin, 1) : '', ref: '', booked: false });
   },
-  'add-leg'() { addItem('legs', newLeg('')); },
+  'add-leg'() {   // continues from the previous leg: same day, starting where it ended
+    const j = findJob(S.openId), last = j.legs[j.legs.length - 1], l = newLeg(last ? last.date : j.startDate); if (last && last.to) l.from = last.to;
+    addItem('legs', l);
+  },
   'add-task'() {
     const inp = $('#newTask'); const v = inp.value.trim();
     if (!v) { inp.focus(); return; }
@@ -1059,8 +1074,9 @@ const actions = {
   },
   async confirm() {
     const j = findJob(S.openId);
+    const errs = jobErrors(j); if (errs.length) { toast(errs[0], 'err'); return; }
     const hardNames = clashesFor(Object.assign({}, j, { status: 'confirmed' })).filter(c => c.hard).map(clashName);
-    if (!await askConfirm('Confirm this job?', 'It will turn ' + S.colours.confirmed + ' on the calendar and the booking checklist will appear.' +
+    if (!await askConfirm('Confirm this job?', 'It will turn ' + S.colours.confirmed + ' on the calendar and the booking checklist will appear.' + (isPastJob(j) ? ' \u26A0\uFE0F The dates are in the past.' : '') +
       (hardNames.length ? ' \u26A0\uFE0F It clashes with another confirmed job: ' + hardNames.join('; ') + '.' : ''), 'Confirm job', false)) return;
     await busy(async () => {
       try {
@@ -1129,7 +1145,10 @@ async function saveDraft() {
   const data = { status: j.status };
   ['title', 'notes', 'location', 'startDate', 'startTime', 'endDate', 'endTime'].forEach(k => { data[k] = String(j[k] || '').trim(); });
   data.clientId = j.clientId || '';
-  if (conf) ['flights', 'stays', 'legs', 'tasks'].forEach(k => { data[k] = j[k]; });
+  data.legs = conf ? j.legs : (j.legs || []).filter(l => l.from || l.to);
+  if (conf) ['flights', 'stays', 'tasks'].forEach(k => { data[k] = j[k]; });
+  const errs = jobErrors(j); if (errs.length) { err.textContent = errs[0]; return; }
+  if (isPastJob(j) && !await askConfirm('This job is in the past', dateRange(j) + ' has already happened. Save it anyway, for example as a record of a flight you flew?', 'Save anyway', false)) return;
   const hard = conf ? clashesFor(j).filter(c => c.hard) : [];
   if (hard.length && !await askConfirm('Clashes with a confirmed job', 'These dates overlap ' + hard.map(clashName).join('; ') + '. Save it anyway?', 'Save anyway', false)) return;
   await busy(async () => {
@@ -1457,6 +1476,41 @@ async function dirSave(kind) {
     S.dirEdit = null; render(); toast('Saved', '');
   } catch (e) { err.textContent = e.message || String(e); }
 }
+// ---------- date sanity: time can't run backwards, and a warning for the past ----------
+// Mirrors validateJob_ in Code.gs, which refuses the same things. The page shows the reason and simply doesn't save until it is fixed.
+function jobErrors(j) {
+  const out = [], fmt = (d, t) => fmtDate(d) + (t ? ' ' + t : '');
+  if (j.startDate) {
+    const ed = j.endDate || j.startDate;
+    if (ed + 'T' + (j.endTime || '23:59') < j.startDate + 'T' + (j.startTime || '00:00')) out.push('This job ends (' + fmt(ed, j.endTime) + ') before it starts (' + fmt(j.startDate, j.startTime) + ').');
+  }
+  (j.flights || []).forEach(f => { if (f.depart && f.arrive && f.arrive < f.depart) out.push('Travel' + (f.route ? ' ' + f.route : '') + ' arrives before it departs.'); });
+  (j.stays || []).forEach(s => { if (s.checkIn && s.checkOut && s.checkOut < s.checkIn) out.push('Accommodation' + (s.location ? ' ' + s.location : '') + ' checks out before it checks in.'); });
+  return out;
+}
+const nowLocalISO = () => { const d = new Date(); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); };
+const isPastJob = j => !!j.startDate && (j.endDate || j.startDate) + 'T' + (j.endTime || '23:59') < nowLocalISO();
+const dateEdited = new Set();   // jobs whose dates were changed in this visit: only then is "in the past" worth shouting about (a finished job awaiting its invoice is normal)
+function checksHTML(j) {
+  return jobErrors(j).map(m => '<div class="fpstat late">⛔ ' + esc(m) + ' It can’t be saved until this is fixed.</div>').join('') +
+    ((j.id === 'draft' || dateEdited.has(j.id)) && isPastJob(j) ? '<div class="fpstat prompt">⚠️ ' + esc(dateRange(j)) + ' is in the past. That’s fine if you’re logging it as a record, but check the dates.</div>' : '') + clashHTML(j);
+}
+// legs for a tentative job (the same legs carry over when it is confirmed)
+function syncLocFromLegs(j) {
+  const parts = []; (j.legs || []).forEach(l => { if (l.from && parts[parts.length - 1] !== l.from) parts.push(l.from); if (l.to) parts.push(l.to); });
+  const chain = parts.join(' - ');
+  if (!j.location || j.location === j._autoLoc) { j.location = chain; const li = $('[data-f=location]'); if (li) li.value = chain; }
+  j._autoLoc = chain;
+}
+function tentLegHTML(l, i) {
+  return '<div class="item" data-list="legs" data-id="' + l.id + '"><div class="item-h"><div class="item-t static"><b>Leg ' + (i + 1) + '</b></div>' +
+    '<button class="icon sm" data-act="del" aria-label="Remove leg">✕</button></div><div class="item-b"><div class="grid2">' +
+    fld('From (ICAO)', 'data-f="from" maxlength="4" autocapitalize="characters" autocomplete="off" placeholder="e.g. EGKB"', l.from) +
+    fld('To (ICAO)', 'data-f="to" maxlength="4" autocapitalize="characters" autocomplete="off" placeholder="e.g. LFMN"', l.to) + '</div><div class="grid2">' +
+    fld('Departure date', 'data-f="date"', l.date, 'date') + fld('Departure time (UTC)', 'data-f="time"', l.time, 'time') + '</div></div></div>';
+}
+const tentLegs = j => '<section class="sect"><h3>Legs (optional)</h3>' + ((j.legs || []).map(tentLegHTML).join('') ||
+  '<p class="small">Know the route already? Add each leg. They carry over when you confirm the job, ready for its GAR and flight plan.</p>') + '<button class="btn" data-act="add-leg">+ Add leg</button></section>';
 // ---------- date clashes ----------
 // A job runs from its start to its end (all day when no times are given); a drive that starts earlier or finishes later widens it.
 // Two confirmed jobs on top of each other get a firm warning; anything involving a tentative job gets a gentle heads-up. Nothing is blocked.
@@ -1485,8 +1539,10 @@ function clashHTML(j) {
     (soft.length ? '<div class="fpstat info">Heads-up: these dates overlap ' + soft.map(c => esc(clashName(c))).join('; ') + '. Fine if it’s deliberate.</div>' : '');
 }
 const clashTag = j => { const cl = clashesFor(j); return cl.length ? '<div class="small clashtag' + (cl.some(c => c.hard) ? ' hard' : '') + '">' + (cl.some(c => c.hard) ? '⚠️ Clashes with ' : 'Overlaps ') + esc(jobTitle(cl[0].job)) + (cl.length > 1 ? ' +' + (cl.length - 1) : '') + '</div>' : ''; };
-function refreshClash() { const el = $('#clashBox'), j = S.openId && findJob(S.openId); if (el && j) el.innerHTML = clashHTML(j); }
-['input', 'change'].forEach(ev => document.addEventListener(ev, e => { if (e.target.dataset && /^(startDate|endDate|startTime|endTime|depart|driveTime|mode)$/.test(e.target.dataset.f || '')) setTimeout(refreshClash, 0); }));
+function refreshClash() { const el = $('#clashBox'), j = S.openId && findJob(S.openId); if (el && j) el.innerHTML = checksHTML(j); }
+['input', 'change'].forEach(ev => document.addEventListener(ev, e => { const f = e.target.dataset && e.target.dataset.f; if (/^(startDate|endDate|startTime|endTime|depart|arrive|checkIn|checkOut|driveTime|mode)$/.test(f || '')) {
+  if (/^(startDate|endDate|startTime|endTime)$/.test(f) && S.openId) dateEdited.add(S.openId);
+  setTimeout(refreshClash, 0); } }));
 // ---------- invoices ----------
 // Invoices live in the pilot's own spreadsheet (see Code.gs). Drafts are editable; once issued they are fixed, and the
 // invoice emails go to the PILOT (never straight to the client); he checks them and forwards them himself.
@@ -1797,7 +1853,7 @@ function importPayload(g) {
   const data = { title: g.title, status: g.status, notes: g.notes, location: '', startDate: g.start, endDate: g.end || g.start, startTime: '', endTime: '' };
   if (g.status === 'confirmed') {
     data.flights = [newFlight('out'), newFlight('return')];
-    data.stays = [{ id: uid(), location: '', checkIn: g.start, checkOut: g.end || g.start, ref: '', booked: false }];
+    data.stays = [{ id: uid(), location: '', checkIn: g.start, checkOut: outFor(g.start, g.end), ref: '', booked: false }];
     data.legs = g.legs.map(l => Object.assign(newLeg(l.date), { from: l.from, to: l.to, route: l.from + ' > ' + l.to, time: l.time, dest: icaoCountry(l.to) || 'UK' }));
     data.tasks = POST_FLIGHT_TASKS();
   } else {
