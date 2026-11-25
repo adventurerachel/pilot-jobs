@@ -19,7 +19,7 @@ A simple job tracker and checklist for a freelance general aviation pilot, for u
 - **Import:** jobs can be added in bulk from a spreadsheet using the included template.
 
 **Checklist for each confirmed job**
-- **Legs:** GAR, flight plan and handling for each leg, with the From and To airports (ICAO codes) used to work out the GAR country.
+- **Legs:** create and file the flight plan, GAR and handling for each leg, with the From and To airports (ICAO codes) used to work out the GAR country.
 - **Travel:** outbound and return by ✈️ flight, 🚆 train, 🚗 driving or other. Driving time is blocked out on the calendar, and commercial flights get a 24-hour check-in reminder.
 - **Accommodation and post-flight tasks:** 🏨 stays, then 🧾 invoice and 💷 expense tasks, including a check that each has been paid.
 - **To do tab:** everything outstanding across all jobs, sorted by date or by task.
@@ -34,11 +34,11 @@ A simple job tracker and checklist for a freelance general aviation pilot, for u
 
 **Invoicing**
 - **Per-client day rates:** invoices are built from the job days, plus fees and expenses passed on to the client.
-- **PDFs, no accidental sending:** each invoice is a PDF emailed to the pilot to check and forward, so nothing reaches a client without your seeing it.
+- **PDFs, no accidental sending:** each invoice is a PDF emailed to the pilot to check and forward, so nothing reaches a client without his seeing it.
 - **Overdue payments:** a chase item and a ready-written reminder, firmer the later the payment.
 
 **Everyday use**
-- **Phone or laptop:** installable on a home screen, with large type. Use it on your laptop for entering details or looking at things on a larger screen, and have it in your pocket and ready to go on your phone.
+- **Phone or laptop:** installable on a home screen, with large type.  Use it on your laptop for entering details or looking at things on a larger screen, and have it in your pocket and ready to go on your phone.
 
 ## How it fits together
 
