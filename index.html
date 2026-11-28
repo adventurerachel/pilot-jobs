@@ -299,7 +299,7 @@ function nightsBetween(a, b) {
   return n > 0 ? n : 0;
 }
 // ---- deadline windows for flight plans and GARs (all times UTC) ----
-const DNAME = { fp: 'Flight plan', gar: 'GAR' };
+const DNAME = { gar: 'GAR', garFr: 'French GAR' };
 function legDep(l) {
   if (!l.date || !l.time) return null;
   const p = l.date.split('-').map(Number), q = l.time.split(':').map(Number);
@@ -310,11 +310,32 @@ function parisWeekend(ms) {
   const d = new Date(ms).toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'Europe/Paris' });
   return d === 'Sat' || d === 'Sun';
 }
-// ICAO airport codes start with a region prefix: EG = United Kingdom, LF = France. Anything else that looks like an ICAO code is "anywhere else".
-function icaoCountry(code) {
+// Which jurisdiction an ICAO airport code is in. Northern Ireland (EGA...), Jersey / Guernsey / Alderney (EGJ...) and the
+// Isle of Man (EGNS) do NOT count as the UK for GAR purposes, so a flight between any of them and the rest of the UK needs a UK GAR.
+function icaoJur(code) {
   const c = String(code || '').trim().toUpperCase();
   if (!/^[A-Z]{4}$/.test(c)) return '';
+  if (c.startsWith('EGA')) return 'NI';
+  if (c.startsWith('EGJ')) return 'CI';
+  if (c === 'EGNS') return 'IOM';
+  if (c === 'EGYP') return 'OTHER';
   return c.startsWith('EG') ? 'UK' : c.startsWith('LF') ? 'FR' : 'OTHER';
+}
+// Which GARs a flight needs, from its two airports: a UK GAR when exactly one end is in the UK, a French GAR when exactly one end is in France.
+// null until both airports are entered.
+function garNeeds(l) {
+  const a = icaoJur(l.from), b = icaoJur(l.to);
+  if (!a || !b) return null;
+  return { uk: (a === 'UK') !== (b === 'UK'), fr: (a === 'FR') !== (b === 'FR') };
+}
+// The GAR steps of a leg: [{ kind, field, label }]. With the airports unknown there is one generic "GAR submitted"; with a flight that needs none there are none.
+function garSteps(l) {
+  const n = garNeeds(l);
+  if (!n) return [{ kind: 'gar', field: 'gar', label: 'GAR submitted' }];
+  const out = [];
+  if (n.uk) out.push({ kind: 'gar', field: 'gar', label: 'UK GAR submitted' });
+  if (n.fr) out.push({ kind: 'garFr', field: 'garFr', label: 'French GAR submitted' });
+  return out;
 }
 const joinRoute = l => l.from && l.to ? l.from + ' \u2192 ' + l.to : (l.from || l.to || '');
 // Older legs stored one "route" string: split "EGKB > LFMN" into the two fields when the page loads them.
@@ -323,30 +344,30 @@ function splitLeg(l) {
     const m = /^\s*([A-Za-z]{4})\s*(?:>|\u2192|-|to)\s*([A-Za-z]{4})\s*$/i.exec(l.route);
     if (m) { l.from = m[1].toUpperCase(); l.to = m[2].toUpperCase(); }
   }
-  l.from = l.from || ''; l.to = l.to || ''; l.destManual = !!l.destManual;
-  if (l.to && !l.destManual && icaoCountry(l.to)) l.dest = icaoCountry(l.to);
+  l.from = l.from || ''; l.to = l.to || '';
+  if (l.garFr === undefined) {   // older legs had one GAR for the destination country
+    const fr = l.dest === 'FR'; l.garFr = fr && !!l.gar; if (fr) l.gar = false;
+  }
   return l;
 }
-// GAR rule from the destination country (set by the pilot's rules). null until a destination is chosen.
-function garRule(l) {
-  if (l.dest === 'UK') return { earliest: 48, latest: 0, note: 'UK arrival: GAR no earlier than 48 h before flight time.' };
-  if (l.dest === 'OTHER') return { earliest: '', latest: 0, note: 'No GAR rule for this destination.' };
-  if (l.dest === 'FR') {
-    if (!l.date) return { earliest: '', latest: 0, note: 'France: the rule depends on the weekday – add the departure date.' };
-    const dep = legDep({ date: l.date, time: l.time || '12:00' });
-    return parisWeekend(dep)
-      ? { earliest: '', latest: 48, note: 'France, weekend: GAR at least 48 h before flight time.' }
-      : { earliest: 24, latest: 0, note: 'France, weekday: GAR within 24 h of flight time (not earlier).' };
-  }
-  return null;
+// GAR deadlines, all worked out from the airports and the departure:
+//   UK GAR: at least 2 h before departure.   French GAR: at least 48 h before departure on a Saturday or Sunday, 24 h on a weekday (Paris time).
+function legRule(l, kind) {
+  const n = garNeeds(l);
+  if (!n) return null;
+  if (kind === 'gar') return n.uk ? { earliest: '', latest: 2, note: 'UK GAR: submit at least 2 h before departure.' } : null;
+  if (!n.fr) return null;
+  if (!l.date) return { earliest: '', latest: 24, note: 'French GAR: 24 h before departure on a weekday, 48 h on a weekend. Add the departure date.' };
+  const dep = legDep({ date: l.date, time: l.time || '12:00' });
+  return parisWeekend(dep)
+    ? { earliest: '', latest: 48, note: 'French GAR, weekend departure: submit at least 48 h before departure.' }
+    : { earliest: '', latest: 24, note: 'French GAR, weekday departure: submit at least 24 h before departure.' };
 }
-function legRule(l, kind) { return kind === 'gar' ? garRule(l) : { earliest: l.fpEarliest, latest: l.fpLatest }; }
 function legWindow(l, kind) {
   const rule = legRule(l, kind), dep = legDep(l);
   if (!rule || dep == null) return null;
-  const early = (rule.earliest === '' || rule.earliest == null) ? null : Number(rule.earliest);
   const late = (rule.latest === '' || rule.latest == null) ? 0 : Number(rule.latest);
-  return { dep: dep, opens: early == null ? null : dep - early * 36e5, due: dep - late * 36e5 };
+  return { dep: dep, opens: null, due: dep - late * 36e5 };
 }
 function fmtUTC(ms) {
   return new Date(ms).toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' }) + ' UTC';
@@ -355,35 +376,25 @@ function human(ms) {
   const a = Math.abs(ms), h = Math.floor(a / 36e5);
   return h >= 48 ? Math.floor(h / 24) + ' days' : h >= 1 ? h + ' h' : Math.max(1, Math.round(a / 6e4)) + ' min';
 }
-// kind: 'fp' | 'gar'.  level: ok | info | prompt | wait | open | soon | late | past
+// kind: 'gar' (UK) | 'garFr' (French).  level: ok | info | prompt | late | soon | open | past
 function legStatus(l, kind) {
-  const gar = kind === 'gar';
-  if (gar ? l.gar : l.plan) return { level: 'ok', text: gar ? 'GAR submitted ✓' : 'Flight plan filed ✓' };
-  const verb = gar ? 'submit' : 'file';
-  let prompt = '';
-  if (gar) {
-    if (!garRule(l)) return { level: 'prompt', text: 'Choose the destination country above to apply the GAR rule.' };
-  } else {
-    const hasRule = (l.fpEarliest !== '' && l.fpEarliest != null) || (l.fpLatest !== '' && l.fpLatest != null);
-    if (!hasRule && l.fpNoRule !== true) prompt = 'Check the filing rule for this jurisdiction and enter it above (or tick “No specific rule”). ';
-  }
+  const fr = kind === 'garFr', name = fr ? 'French GAR' : (garNeeds(l) ? 'UK GAR' : 'GAR');
+  if (fr ? l.garFr : l.gar) return { level: 'ok', text: name + ' submitted ✓' };
+  if (!garNeeds(l)) return { level: 'info', text: 'Enter both airports and the app works out which GAR is needed. Not needed? Just tick it as done.' };
   const w = legWindow(l, kind);
   if (!w) return { level: 'info', text: 'Add the departure date and time (UTC) to work out the deadline.' };
   const now = Date.now();
   if (now > w.dep) return { level: 'past', text: 'Departure time has passed. Tick the box if it was done.' };
-  if (now > w.due) return { level: 'late', text: prompt + 'Deadline passed ' + human(now - w.due) + ' ago (' + fmtUTC(w.due) + ').' };
-  if (w.opens != null && now < w.opens)
-    return { level: 'wait', text: prompt + 'Too early to ' + verb + ' – window opens in ' + human(w.opens - now) + ' (' + fmtUTC(w.opens) + '). Deadline ' + fmtUTC(w.due) + '.' };
+  if (now > w.due) return { level: 'late', text: 'Deadline passed ' + human(now - w.due) + ' ago (' + fmtUTC(w.due) + ').' };
   const left = w.due - now;
-  if (left <= 864e5) return { level: 'soon', text: prompt + (gar ? 'Submit' : 'File') + ' now – deadline in ' + human(left) + ' (' + fmtUTC(w.due) + ').' };
-  return { level: prompt ? 'prompt' : 'open', text: prompt + 'Window open – deadline in ' + human(left) + ' (' + fmtUTC(w.due) + ').' };
+  if (left <= 864e5) return { level: 'soon', text: 'Submit now – deadline in ' + human(left) + ' (' + fmtUTC(w.due) + ').' };
+  return { level: 'open', text: 'Deadline in ' + human(left) + ' (' + fmtUTC(w.due) + ').' };
 }
-const fpStatus = l => legStatus(l, 'fp');
 function deadlineAlerts() {
   const out = [];
-  S.active.filter(j => j.status === 'confirmed').forEach(j => (j.legs || []).forEach(l => ['gar', 'fp'].forEach(kind => {
-    const st = legStatus(l, kind);
-    if (st.level === 'late' || st.level === 'soon') out.push({ job: j, leg: l, kind: kind, s: st, due: legWindow(l, kind).due });
+  S.active.filter(j => j.status === 'confirmed').forEach(j => (j.legs || []).forEach(l => garSteps(l).forEach(step => {
+    const kind = step.kind, st = legStatus(l, kind);
+    if ((st.level === 'late' || st.level === 'soon') && legWindow(l, kind)) out.push({ job: j, leg: l, kind: kind, s: st, due: legWindow(l, kind).due });
   })));
   return out.sort((a, b) => a.due - b.due);
 }
@@ -429,7 +440,7 @@ function driveEnd(f) {
   return en.toISOString().slice(0, 10) !== new Date(st).toISOString().slice(0, 10) ? hm + ' the next day' : hm;
 }
 const fixTravel = f => { f.mode = travelMode(f); f.commercial = f.mode === 'flight'; return f; };
-const CATS = [['chase', 'Chase unpaid invoices'], ['create', 'Create flight plans'], ['plan', 'File flight plans'], ['gar', 'Submit GARs'], ['handling', 'Handling, fuel & permits'],
+const CATS = [['chase', 'Chase unpaid invoices'], ['create', 'Flight plans created'], ['plan', 'Flight plans filed'], ['gar', 'GARs submitted'], ['handling', 'Handling, fuel & permits'],
   ['out', 'Book outbound travel'], ['ret', 'Book return travel'], ['checkin', 'Check in for flights'],
   ['stay', 'Book accommodation'], ['after', 'Post-flight tasks']];
 function allChecks(j) {
@@ -440,13 +451,13 @@ function allChecks(j) {
   j.legs.forEach(l => {
     if (l.plan && !l.planMade) l.planMade = true;   // a plan that is already filed was obviously created
     const d = l.date || start;
-    out.push({ cat: 'create', label: 'Create flight plan' + legName(l), detail: l.route, done: l.planMade, list: 'legs', id: l.id, field: 'planMade', date: d });
-    const w = legWindow(l, 'fp');
-    out.push({ cat: 'plan', label: 'File flight plan' + legName(l), detail: l.route, done: l.plan, list: 'legs', id: l.id, field: 'plan',
-      date: w ? new Date(w.due).toISOString().slice(0, 10) : d, leg: l });
-    const gw = legWindow(l, 'gar');
-    out.push({ cat: 'gar', label: 'Submit GAR' + legName(l), detail: l.route, done: l.gar, list: 'legs', id: l.id, field: 'gar',
-      date: gw ? new Date(gw.due).toISOString().slice(0, 10) : d, leg: l });
+    out.push({ cat: 'create', label: 'Flight plan created' + legName(l), detail: l.route, done: l.planMade, list: 'legs', id: l.id, field: 'planMade', date: d });
+    out.push({ cat: 'plan', label: 'Flight plan filed' + legName(l), detail: l.route, done: l.plan, list: 'legs', id: l.id, field: 'plan', date: d });
+    garSteps(l).forEach(step => {
+      const gw = legWindow(l, step.kind);
+      out.push({ cat: 'gar', kind: step.kind, label: step.label + legName(l), detail: l.route, done: l[step.field], list: 'legs', id: l.id, field: step.field,
+        date: gw ? new Date(gw.due).toISOString().slice(0, 10) : d, leg: l });
+    });
     out.push({ cat: 'handling', label: 'Arrange handling, fuel & permits' + legName(l), detail: l.route, done: l.handling, list: 'legs', id: l.id, field: 'handling', date: d });
   });
   const noun = f => ({ flight: 'flight', train: 'train' }[f.mode] || 'travel');
@@ -483,7 +494,7 @@ function todoRow(t, byTask) {
   const main = (t.icon ? t.icon + ' ' : '') + (byTask ? (t.detail || 'Details to be added') : t.label);
   let sub = esc(jobTitle(t.job)) + (byTask && t.date ? ' \u00b7 ' + fmtDate(t.date) : '');
   if (t.cat === 'checkin') sub += '<br><span class="fpstat">' + (t.when ? 'Departs ' + esc(fmtDT(t.when)) : 'Add the departure time to get reminders') + '</span>';
-  if ((t.cat === 'plan' || t.cat === 'gar') && t.leg) { const s = legStatus(t.leg, t.cat === 'gar' ? 'gar' : 'fp'); sub += '<br><span class="fpstat ' + s.level + '">' + esc(s.text) + '</span>'; }
+  if (t.cat === 'gar' && t.leg) { const s = legStatus(t.leg, t.kind || 'gar'); sub += '<br><span class="fpstat ' + s.level + '">' + esc(s.text) + '</span>'; }
   return '<div class="todo"><input type="checkbox" aria-label="Mark done" data-todo="' + t.job.id + '|' + t.list + '|' + t.id + '|' + t.field + '">' +
     '<div class="todo-t" data-act="open" data-id="' + t.job.id + '"><b>' + esc(main) + '</b><span class="sum">' + sub + '</span></div></div>';
 }
@@ -515,7 +526,7 @@ function progress(j) {
 }
 function isDone(list, it) {
   if (list === 'flights' && travelMode(it) === 'car') return true;          // driving yourself: nothing to do
-  if (list === 'legs') return it.planMade && it.gar && it.plan && it.handling;
+  if (list === 'legs') return !!(it.planMade && it.plan && it.handling && garSteps(it).every(s => it[s.field]));
   return !!(it.booked || it.done);
 }
 function minutesText() {
@@ -545,10 +556,10 @@ function itemSummary(list, it) {
       ' \u00B7 ' + (it.booked ? 'Booked \u2713' : 'To book');
   }
   if (list === 'legs') {
-    const k = ['planMade', 'plan', 'gar', 'handling'].filter(x => it[x]).length;
-    const hot = kind => { const lv = legStatus(it, kind).level; return lv === 'late' || lv === 'soon'; };
-    return [it.route || 'Route TBC', it.date ? fmtDate(it.date) + (it.time ? ' ' + it.time + 'Z' : '') : '', k + '/4 done',
-      hot('fp') ? '\u26A0 flight plan due' : '', hot('gar') ? '\u26A0 GAR due' : ''].filter(Boolean).join(' \u00B7 ');
+    const steps = ['planMade', 'plan', 'handling'].concat(garSteps(it).map(s => s.field)), k = steps.filter(x => it[x]).length;
+    const hot = kind => { const lv = legStatus(it, kind).level; return (lv === 'late' || lv === 'soon') && legWindow(it, kind); };
+    return [it.route || 'Route TBC', it.date ? fmtDate(it.date) + (it.time ? ' ' + it.time + 'Z' : '') : '', k + '/' + steps.length + ' done',
+      garSteps(it).some(s => hot(s.kind)) ? '\u26A0 GAR due' : ''].filter(Boolean).join(' \u00B7 ');
   }
   return '';
 }
@@ -727,33 +738,31 @@ function stayHTML(s) {
       fld('Booking ref / notes', 'data-f="ref"', s.ref) + '</div>' : '') +
     '</div>';
 }
-const destNote = l => l.destManual ? 'Country set by hand.' : icaoCountry(l.to) ? 'Worked out from the destination airport ' + l.to + '.' : 'Enter the destination airport above and this is filled in for you.';
 function legHTML(l, i) {
   const cb = (k, label) => '<label class="inline"><input type="checkbox" data-f="' + k + '" ' + (l[k] ? 'checked' : '') + '> ' + label + '</label>';
-  const st = fpStatus(l), gs = legStatus(l, 'gar'), gr = garRule(l);
-  const opt = (v, t) => '<option value="' + v + '"' + (l.dest === v ? ' selected' : '') + '>' + t + '</option>';
+  const needs = garNeeds(l), steps = garSteps(l);
   return '<div class="item ' + (isDone('legs', l) ? 'done' : '') + '" data-list="legs" data-id="' + l.id + '">' +
     '<div class="item-h"><div class="item-t static"><b>Leg ' + (i + 1) + '</b><span class="sum" data-sum>' + esc(itemSummary('legs', l)) + '</span></div>' +
     '<button class="icon sm" data-act="del" aria-label="Remove leg">\u2715</button></div>' +
     '<div class="item-b"><div class="grid2">' + fld('From (ICAO)', 'data-f="from" maxlength="4" autocapitalize="characters" autocomplete="off" placeholder="e.g. EGKB"', l.from) +
     fld('To (ICAO)', 'data-f="to" maxlength="4" autocapitalize="characters" autocomplete="off" placeholder="e.g. LFMN"', l.to) + '</div>' +
     '<div class="grid2">' + fld('Departure date', 'data-f="date"', l.date, 'date') + fld('Departure time (UTC)', 'data-f="time"', l.time, 'time') + '</div>' +
-    cb('planMade', 'Create flight plan') +
-    cb('plan', 'File flight plan') +
-    '<div class="fprule"><b>Flight plan filing rule</b><span class="small"> \u2013 set by the departure state / ATC, so check it for each leg</span>' +
-    '<div class="grid2">' +
-    fld('Earliest you can file (hours before departure)', 'data-f="fpEarliest" inputmode="decimal" min="0" step="any" placeholder="e.g. 48 if only allowed within 48 h"', l.fpEarliest, 'number') +
-    fld('Latest you must file (hours before departure)', 'data-f="fpLatest" inputmode="decimal" min="0" step="any" placeholder="e.g. 48 if needed 48 h ahead"', l.fpLatest, 'number') +
-    '</div>' + cb('fpNoRule', 'No specific rule (any time before departure)') +
-    '<p class="fpstat ' + st.level + '" data-fp>' + esc(st.text) + '</p></div>' +
-    '<label class="fld"><span>Destination country (sets the GAR rule)</span><select data-f="dest">' +
-      '<option value="">Choose\u2026</option>' + opt('UK', 'United Kingdom') + opt('FR', 'France') + opt('OTHER', 'Anywhere else') + '</select></label>' +
-    '<p class="small" data-destnote>' + esc(destNote(l)) + '</p>' +
+    cb('planMade', 'Flight plan created') +
+    cb('plan', 'Flight plan filed') +
     garBox(findJob(S.openId), l) +
-    cb('gar', 'Submit GAR') + '<p class="small">GAR not needed for this flight? Just tick it as done.</p>' +
-    '<p class="small" data-garnote>' + esc(gr ? gr.note : '') + '</p>' +
-    '<p class="fpstat ' + gs.level + '" data-gar>' + esc(gs.text) + '</p>' +
+    '<div data-gars>' + garStepsHTML(l, cb) + '</div>' +
     cb('handling', 'Handling, fuel & permits') + '</div></div>';
+}
+// The GAR tick-boxes for a leg: which ones are needed comes from the airports, so nothing is chosen by hand.
+function garStepsHTML(l, cb) {
+  const needs = garNeeds(l);
+  if (needs && !garSteps(l).length) return '<p class="small">No GAR needed: this flight does not cross the UK or French border.</p>';
+  return garSteps(l).map(s => {
+    const gs = legStatus(l, s.kind), r = legRule(l, s.kind);
+    return cb(s.field, s.label) + '<p class="small" data-garnote="' + s.kind + '">' + esc(r ? r.note : '') + '</p>' +
+      '<p class="fpstat ' + gs.level + '" data-gar="' + s.kind + '">' + esc(gs.text) + '</p>' +
+      (s.kind === 'garFr' ? '<p class="small">The French GAR form isn\u2019t built into the app yet: tick this once you have submitted it.</p>' : '');
+  }).join('');
 }
 function taskHTML(t) {
   return '<div class="item ' + (t.done ? 'done' : '') + '" data-list="tasks" data-id="' + t.id + '">' +
@@ -812,8 +821,8 @@ function renderDetail(app) {
 }
 
 // ---------- new job (tentative by default; tick "Confirmed flight" for the full checklist) ----------
-const newLeg = date => ({ id: uid(), route: '', from: '', to: '', destManual: false, date: date || '', time: '', dest: 'UK', fpEarliest: '', fpLatest: '', fpNoRule: false, gar: false, plan: false, planMade: false, handling: false,
-  fpDueEventId: '', fpOpenEventId: '', fpSig: '', garDueEventId: '', garOpenEventId: '', garSig: '' });
+const newLeg = date => ({ id: uid(), route: '', from: '', to: '', date: date || '', time: '', gar: false, garFr: false, plan: false, planMade: false, handling: false,
+  fpDueEventId: '', fpOpenEventId: '', fpSig: '', garDueEventId: '', garOpenEventId: '', garSig: '', garFrDueEventId: '', garFrOpenEventId: '', garFrSig: '' });
 function newDraft() {
   return { id: 'draft', status: 'tentative', prevStatus: '', title: '', notes: '', location: '', startDate: '', startTime: '', endDate: '', endTime: '',
     flights: [], stays: [], legs: [], tasks: [], eventId: '', calSig: '', created: '', updated: '', seeded: false };
@@ -916,9 +925,8 @@ function refreshDerived(j) {
     el.classList.toggle('done', !!isDone(list, it));
     const h = el.querySelector('[data-hint]'); if (h) h.textContent = flightHint(it);
     const ck = el.querySelector('[data-checkin]'); if (ck) ck.hidden = !it.commercial;
-    const fp = el.querySelector('[data-fp]'); if (fp) { const s = fpStatus(it); fp.className = 'fpstat ' + s.level; fp.textContent = s.text; }
-    const ga = el.querySelector('[data-gar]'); if (ga) { const s = legStatus(it, 'gar'); ga.className = 'fpstat ' + s.level; ga.textContent = s.text; }
-    const gn = el.querySelector('[data-garnote]'); if (gn) { const r = garRule(it); gn.textContent = r ? r.note : ''; }
+    el.querySelectorAll('[data-gar]').forEach(ga => { const s = legStatus(it, ga.dataset.gar); ga.className = 'fpstat ' + s.level; ga.textContent = s.text; });
+    el.querySelectorAll('[data-garnote]').forEach(gn => { const r = legRule(it, gn.dataset.garnote); gn.textContent = r ? r.note : ''; });
   });
   const cs = $('#calstate'); if (cs) cs.innerHTML = calState(j);
 }
@@ -935,27 +943,34 @@ function onField(e) {
     const it = j[itemEl.dataset.list].find(x => x.id === itemEl.dataset.id);
     if (!it) return;
     const prevNights = itemEl.dataset.list === 'stays' ? nightsBetween(it.checkIn, it.checkOut) : 0;
+    const autoBefore = itemEl.dataset.list === 'legs' || itemEl.dataset.list === 'flights' ? autoJob(j) : null;
+    const prevDepart = itemEl.dataset.list === 'flights' ? it.depart : '';
     it[el.dataset.f] = val;
+    if (itemEl.dataset.list === 'flights' && el.dataset.f === 'depart' && val && travelMode(it) === 'flight' && (!it.arrive || it.arrive === plusHour(prevDepart))) {
+      it.arrive = plusHour(val);                    // a booked flight: arrival starts as one hour after departure (still editable)
+      const ai = itemEl.querySelector('[data-f="arrive"]'); if (ai) ai.value = it.arrive;
+    }
     if (itemEl.dataset.list === 'stays') {   // the check-out date is never typed: it is check-in plus the number of nights, so it can't come before check-in
       const f = el.dataset.f;
       if (f === 'nights') { const n = parseInt(val, 10); if (it.checkIn) { delete it.nights; it.checkOut = addDaysISO(it.checkIn, n > 0 ? Math.min(n, 365) : 1); } else it.nights = n > 0 ? n : 1; }
       else if (f === 'checkIn') { it.checkOut = val ? addDaysISO(val, prevNights || parseInt(it.nights, 10) || 1) : ''; if (val) delete it.nights; }
       const on = itemEl.querySelector('[data-outnote]'); if (on) on.textContent = outNote(it);
     }
-    if (itemEl.dataset.list === 'flights' && el.dataset.f === 'mode') { it.commercial = val === 'flight'; refreshDerived(j); scheduleSave(j.id, 250); render(); return; }
+    if (itemEl.dataset.list === 'flights' && el.dataset.f === 'mode') { it.commercial = val === 'flight'; if (autoBefore) applyAuto(j, autoBefore); refreshDerived(j); scheduleSave(j.id, 250); render(); return; }
     if (itemEl.dataset.list === 'legs') {
       const f = el.dataset.f;
       if (f === 'from' || f === 'to') {
         const up = String(val).toUpperCase().replace(/[^A-Z]/g, ''); if (up !== val) el.value = up;
-        it[f] = up; it.route = joinRoute(it); if (j.status === 'tentative') syncLocFromLegs(j);
-        if (f === 'to' && icaoCountry(up)) {            // a new destination: infer the country again
-          it.dest = icaoCountry(up); it.destManual = false;
-          const sel = itemEl.querySelector('[data-f=dest]'); if (sel) sel.value = it.dest;
+        it[f] = up; it.route = joinRoute(it);
+        if (itemEl.querySelector('[data-gars]')) {     // which GARs are needed depends on the airports: redraw that part
+          const holder = itemEl.querySelector('[data-gars]');
+          const cbf = (k, label) => '<label class="inline"><input type="checkbox" data-f="' + k + '" ' + (it[k] ? 'checked' : '') + '> ' + label + '</label>';
+          holder.innerHTML = garStepsHTML(it, cbf);
         }
-      } else if (f === 'dest') it.destManual = true;
+      }
       else if (f === 'aircraftId') { scheduleSave(j.id, 250); refreshDerived(j); render(); return; }
-      const dn = itemEl.querySelector('[data-destnote]'); if (dn) dn.textContent = destNote(it);
     }
+    if (autoBefore) { applyAuto(j, autoBefore); setTimeout(refreshClash, 0); }
   } else {
     j[el.dataset.f] = val;
   }
@@ -1044,7 +1059,7 @@ const actions = {
   'dir-save-settings'() { busy(() => api('saveGarSettings', { contact: val('gsContact'), address: val('gsAddress') })).then(s => { S.dir.garSettings = s; toast('Saved', ''); }).catch(e => toast(e.message || String(e), 'err')); },
   'dir-save-biz'() {
     busy(() => api('saveBusinessSettings', { name: val('bName'), reviewEmail: val('bReview'), address: val('bAddress'), email: val('bEmail'), phone: val('bPhone'), bankAccountName: val('bBankName'), sortCode: val('bSort'),
-      accountNumber: val('bAcc'), companyNo: val('bCoNo'), terms: val('bTerms'), prefix: val('bPrefix'), nextNumber: parseInt(val('bNext'), 10) || 0, footer: val('bFooter') }))
+      accountNumber: val('bAcc'), companyNo: val('bCoNo'), terms: val('bTerms'), footer: val('bFooter') }))
       .then(b => { S.dir.business = b; toast('Saved', ''); render(); }).catch(e => toast(e.message || String(e), 'err'));
   },
   'person-del'(t) {
@@ -1084,8 +1099,9 @@ const actions = {
   toggle(t) { UI.open.has(t.dataset.id) ? UI.open.delete(t.dataset.id) : UI.open.add(t.dataset.id); render(); },
   del(t) {
     const itemEl = t.closest('[data-list]');
-    const j = findJob(S.openId);
-    j[itemEl.dataset.list] = j[itemEl.dataset.list].filter(x => x.id !== itemEl.dataset.id);
+    const j = findJob(S.openId), list = itemEl.dataset.list, autoBefore = list === 'legs' || list === 'flights' ? autoJob(j) : null;
+    j[list] = j[list].filter(x => x.id !== itemEl.dataset.id);
+    if (autoBefore) applyAuto(j, autoBefore);
     scheduleSave(j.id, 100); render();
   },
   'add-out'() { addItem('flights', newFlight('out')); },
@@ -1226,10 +1242,10 @@ function garData(job, leg, dir) {
   let crew = (leg.crewIds || []).map(byId).filter(Boolean);
   if (!crew.length) crew = (dir.people || []).filter(p => p.role === 'crew').slice(0, 1);       // default: the pilot
   const pax = (leg.paxIds || []).map(byId).filter(Boolean);
-  const ukFrom = icaoCountry(from) === 'UK', ukTo = icaoCountry(to) === 'UK';
+  const needs = garNeeds({ from: from, to: to });
+  const ukFrom = icaoJur(from) === 'UK', ukTo = icaoJur(to) === 'UK';
   if (!/^[A-Z]{4}$/.test(from) || !/^[A-Z]{4}$/.test(to)) missing.push('From and To airports');
-  else if (ukFrom && ukTo) missing.push('this leg is within the UK, which needs no GAR');
-  else if (!ukFrom && !ukTo) missing.push('a UK airport at one end (EG…), because this form is for flights to or from the UK');
+  else if (needs && !needs.uk) missing.push('a UK GAR is only needed when one end of the flight is in the UK (Northern Ireland, Jersey, Guernsey and the Isle of Man count as outside the UK)');
   if (!leg.date) missing.push('departure date');
   if (!leg.time) missing.push('departure time (UTC)');
   if (!leg.arrive) missing.push('arrival time (UTC)');
@@ -1297,6 +1313,67 @@ async function fillGarXlsx(templateBuf, g, JSZipLib) {
   zip.file('xl/sharedStrings.xml', sst);
   zip.file('xl/workbook.xml', wbXml.replace(/<calcPr([^>]*?)\/>/, (m0, a) => /fullCalcOnLoad/.test(a) ? m0 : '<calcPr' + a + ' fullCalcOnLoad="1"/>'));
   return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
+const INVOICE_TEMPLATE_URL = 'invoice-template.xlsx';
+const ordinalDate = iso => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || ''); if (!m) return ''; const d = +m[3], s = (d % 10 === 1 && d !== 11) ? 'st' : (d % 10 === 2 && d !== 12) ? 'nd' : (d % 10 === 3 && d !== 13) ? 'rd' : 'th';
+  return d + s + ' ' + ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'][+m[2] - 1] + ' ' + m[1]; };
+// The one-line client address split over up to four lines (street, town, county, postcode)
+const addressLines = a => { const p = String(a || '').split(/\s*[,\n]\s*/).filter(Boolean); while (p.length > 4) p.splice(1, 2, p[1] + ', ' + p[2]); return p; };
+function invoiceXlsxData(inv) {
+  const rows = [], c = clientOf(inv.clientId) || {};
+  (inv.lines || []).forEach(l => rows.push({ desc: l.desc || '', date: l.date || '', amount: Math.round((parseFloat(l.qty) || 0) * (parseFloat(l.rate) || 0) * 100) / 100 }));
+  (inv.expenses || []).forEach(x => rows.push({ desc: x.desc || '', date: x.date || '', amount: Math.round((parseFloat(x.amount) || 0) * 100) / 100 }));
+  return { number: inv.number || suggestRef(inv) || '', date: ordinalDate(inv.issueDate), clientName: inv.clientName || c.name || '',
+    address: addressLines(inv.clientAddress || c.address || ''), rows: rows.length ? rows : [{ desc: '', date: '', amount: 0 }] };
+}
+// Fills invoice-template.xlsx: the template's own look, table and total are kept; the table grows to fit the lines.
+async function fillInvoiceXlsx(templateBuf, d, JSZipLib) {
+  const zip = await (JSZipLib || window.JSZip).loadAsync(templateBuf);
+  const sheetPath = 'xl/worksheets/sheet1.xml';
+  let sheet = await zip.file(sheetPath).async('string'), sst = await zip.file('xl/sharedStrings.xml').async('string'), table = await zip.file('xl/tables/table1.xml').async('string');
+  if (!/\{\{CLIENT_NAME\}\}/.test(sst) || !/<row r="15"/.test(sheet)) throw new Error('This doesn’t look like the invoice template (invoice-template.xlsx).');
+  const n = d.rows.length, extra = n - 1;
+  const tokens = { INVOICE_DATE: d.date, INVOICE_NUMBER: d.number, CLIENT_NAME: d.clientName, CLIENT_ADDRESS_1: d.address[0] || '', CLIENT_ADDRESS_2: d.address[1] || '', CLIENT_ADDRESS_3: d.address[2] || '', CLIENT_ADDRESS_4: d.address[3] || '' };
+  sst = sst.replace(/\{\{([A-Z_0-9]+)\}\}/g, (m0, k) => k in tokens ? xmlEsc(tokens[k]) : m0);
+  const nSi = (sst.match(/<si[ >]/g) || []).length, add = [];
+  const sIdx = v => { let i = add.indexOf(v); if (i < 0) { add.push(v); i = add.length - 1; } return nSi + i; };
+  const bodyStart = sheet.indexOf('<sheetData>') + 11, bodyEnd = sheet.indexOf('</sheetData>');
+  const rows = sheet.slice(bodyStart, bodyEnd).match(/<row r="\d+"[\s\S]*?<\/row>/g);
+  const rowNo = r => +/<row r="(\d+)"/.exec(r)[1];
+  const head = rows.filter(r => rowNo(r) < 15), tpl = rows.find(r => rowNo(r) === 15), tail = rows.filter(r => rowNo(r) > 15);
+  const shift = (r, by) => r.replace(/(<row r=")(\d+)/, (m0, a, b) => a + (+b + by)).replace(/(<c r="[A-Z]+)(\d+)/g, (m0, a, b) => a + (+b + by));
+  let sum = 0;
+  const setC = (row, col, r, body) => row.replace(new RegExp('<c r="' + col + r + '"([^>]*?)(/>|>[\\s\\S]*?</c>)'), (m0, a) => '<c r="' + col + r + '"' + a.replace(/\s+t="[^"]*"/, '') + body);
+  const dataRows = d.rows.map((x, i) => {
+    const r = 15 + i; sum += x.amount;
+    let row = shift(tpl, i);
+    row = setC(row, 'B', r, x.desc ? ' t="s"><v>' + sIdx(x.desc) + '</v></c>' : '/>');
+    row = setC(row, 'C', r, x.date ? '><v>' + excelDate(x.date) + '</v></c>' : '/>');
+    row = setC(row, 'D', r, '><v>' + x.amount + '</v></c>');
+    return row;
+  });
+  sum = Math.round(sum * 100) / 100;
+  const tailXml = tail.map(r => shift(r, extra)).join('').replace(/(<c r="D\d+"[^>]*>\s*<f>[^<]*<\/f>\s*<v>)[^<]*(<\/v>)/, '$1' + sum + '$2');
+  sheet = sheet.slice(0, bodyStart) + head.join('') + dataRows.join('') + tailXml + sheet.slice(bodyEnd);
+  sheet = sheet.replace(/<dimension ref="[^"]*"\/>/, '<dimension ref="B1:D' + (25 + extra) + '"/>');
+  table = table.replace(/ref="B14:D16"/, 'ref="B14:D' + (16 + extra) + '"').replace(/<autoFilter ref="B14:D15"/, '<autoFilter ref="B14:D' + (15 + extra) + '"');
+  const total = +(/<sst [^>]*count="(\d+)"/.exec(sst) || [0, 0])[1], uniq = +(/<sst [^>]*uniqueCount="(\d+)"/.exec(sst) || [0, 0])[1];
+  sst = sst.replace(/count="\d+"/, 'count="' + (total + n) + '"').replace(/uniqueCount="\d+"/, 'uniqueCount="' + (uniq + add.length) + '"')
+    .replace('</sst>', add.map(v => '<si><t xml:space="preserve">' + xmlEsc(v) + '</t></si>').join('') + '</sst>');
+  zip.file(sheetPath, sheet); zip.file('xl/sharedStrings.xml', sst); zip.file('xl/tables/table1.xml', table);
+  const wb = await zip.file('xl/workbook.xml').async('string');
+  zip.file('xl/workbook.xml', wb.replace(/<calcPr([^>]*?)\/>/, (m0, a) => /fullCalcOnLoad/.test(a) ? m0 : '<calcPr' + a + ' fullCalcOnLoad="1"/>'));
+  return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
+// The invoice as an Excel file made from invoice-template.xlsx, or null if the template isn't on the site.
+async function makeInvoiceXlsx(inv) {
+  try {
+    await loadLib(JSZIP_URL, 'JSZip');
+    const r = await fetch(INVOICE_TEMPLATE_URL); if (!r.ok) return null;
+    const bytes = await fillInvoiceXlsx(await r.arrayBuffer(), invoiceXlsxData(inv));
+    let bin = ''; for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+    return { name: (inv.number || 'invoice') + '.xlsx', bytes, base64: btoa(bin) };
+  } catch (e) { return null; }
 }
 const loadLib = (url, name) => window[name] ? Promise.resolve() : new Promise((ok, fail) => {
   const s = document.createElement('script'); s.src = url; s.onload = ok; s.onerror = () => fail(new Error('Couldn’t load a helper library – check your connection and try again.')); document.head.appendChild(s);
@@ -1451,7 +1528,7 @@ function bizForm(b) {
     '<h3>Bank details (for payment)</h3>' + fld('Account name', 'id="bBankName"', b.bankAccountName) +
     '<div class="grid2">' + fld('Sort code', 'id="bSort" placeholder="00-00-00"', b.sortCode) + fld('Account number', 'id="bAcc" inputmode="numeric"', b.accountNumber) + '</div>' +
     '<h3>Defaults</h3><p class="small">Day rates are set per client (Setup \u2192 Clients).</p>' + fld('Payment terms (days), unless a client has their own', 'id="bTerms" inputmode="numeric"', b.terms || 30) +
-    '<div class="grid2">' + fld('Invoice number prefix', 'id="bPrefix"', b.prefix === undefined ? 'INV-' : b.prefix) + fld('Next invoice number', 'id="bNext" inputmode="numeric"', b.nextNumber || 1) + '</div>' +
+    '<p class="small">Invoice references are the client\u2019s initials followed by the invoice date (for example DW310326), filled in for you on each invoice.</p>' +
     fld('Line at the foot of invoices (optional)', 'id="bFooter" data-nocaps', b.footer) +
     '<button class="btn primary block" data-act="dir-save-biz">Save</button>';
 }
@@ -1529,12 +1606,36 @@ function checksHTML(j) {
     ((j.id === 'draft' || dateEdited.has(j.id)) && isPastJob(j) ? '<div class="fpstat prompt">⚠️ ' + esc(dateRange(j)) + ' is in the past. That’s fine if you’re logging it as a record, but check the dates.</div>' : '') + clashHTML(j);
 }
 // legs for a tentative job (the same legs carry over when it is confirmed)
-function syncLocFromLegs(j) {
-  const parts = []; (j.legs || []).forEach(l => { if (l.from && parts[parts.length - 1] !== l.from) parts.push(l.from); if (l.to) parts.push(l.to); });
-  const chain = parts.join(' - ');
-  if (!j.location || j.location === j._autoLoc) { j.location = chain; const li = $('[data-f=location]'); if (li) li.value = chain; }
-  j._autoLoc = chain;
+// The top of the form (route, start date, end date) follows the legs and the travel to and from the job:
+//   route: the airports in order;  start: the earliest leg or outbound travel;  end: the latest leg arrival or return travel (incl. a drive's end).
+// A box is only filled in while it is empty or still holds what was filled in last time, so anything the pilot types over is left alone.
+function autoJob(j) {
+  const starts = [], ends = [], parts = [];
+  (j.legs || []).forEach(l => {
+    if (l.from && parts[parts.length - 1] !== l.from) parts.push(l.from);
+    if (l.to) parts.push(l.to);
+    if (l.date) { starts.push(l.date); ends.push(l.time && l.arrive && l.arrive <= l.time ? addDaysISO(l.date, 1) : l.date); }
+  });
+  (j.flights || []).forEach(f => {
+    const d = (f.depart || '').slice(0, 10), a = (f.arrive || '').slice(0, 10), de = travelMode(f) === 'car' && f.depart && driveEndISO(f) ? driveEndISO(f).slice(0, 10) : '';
+    if (d) { starts.push(d); ends.push(d); }
+    if (a) ends.push(a);
+    if (de) ends.push(de);
+  });
+  return { location: parts.join(' - '), startDate: starts.length ? starts.reduce((x, y) => x < y ? x : y) : '', endDate: ends.length ? ends.reduce((x, y) => x > y ? x : y) : '' };
 }
+function applyAuto(j, before) {
+  const after = autoJob(j);
+  ['location', 'startDate', 'endDate'].forEach(f => {
+    if (!after[f] || after[f] === j[f] || (j[f] && j[f] !== before[f])) return;
+    j[f] = after[f];
+    const inp = document.querySelector('[data-f="' + f + '"]'); if (inp && !inp.closest('[data-list]')) inp.value = after[f];
+    if (f !== 'location') dateEdited.add(j.id);
+  });
+  if (j.endDate && j.startDate && j.endDate < j.startDate) { j.endDate = j.startDate; const inp = document.querySelector('[data-f="endDate"]'); if (inp) inp.value = j.endDate; }
+}
+// plus one hour on a "YYYY-MM-DDTHH:MM" local date-time (used for the default arrival of a booked flight)
+const plusHour = s => { const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(s || ''); return m ? new Date(Date.UTC(+m[1], m[2] - 1, +m[3], +m[4] + 1, +m[5])).toISOString().slice(0, 16) : ''; };
 function tentLegHTML(l, i) {
   return '<div class="item" data-list="legs" data-id="' + l.id + '"><div class="item-h"><div class="item-t static"><b>Leg ' + (i + 1) + '</b></div>' +
     '<button class="icon sm" data-act="del" aria-label="Remove leg">✕</button></div><div class="item-b"><div class="grid2">' +
@@ -1590,10 +1691,28 @@ const invTotal = e => Math.round(((e.lines || []).reduce((t, l) => t + (parseFlo
 const jobDays = j => (j.startDate ? Math.max(1, dayDiff(j.endDate || j.startDate, j.startDate) + 1) : 1);
 const clientOf = id => (S.dir.clients || []).find(c => c.id === id);
 // A new invoice for a job: the day-rate line is filled in (days x the client's own day rate), expenses are added by hand.
+// Suggested reference: the client's initials (not Limited / Ltd / LLP ...) then the invoice date as ddmmyy, e.g. Dawson Wam on 31 March 2026 -> DW310326.
+function suggestRef(e) {
+  const c = clientOf(e && e.clientId); if (!c || !c.name) return '';
+  const skip = new Set(['LIMITED', 'LTD', 'LLP', 'PLC', 'INC', 'LLC', 'THE', 'AND', '&', 'CO', 'COMPANY']);
+  const ini = c.name.toUpperCase().split(/[^A-Z0-9&]+/).filter(w => w && !skip.has(w)).map(w => w[0]).join('').replace(/[^A-Z0-9]/g, '') || 'INV';
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec((e && e.issueDate) || '');
+  return ini + (m ? m[3] + m[2] + m[1].slice(2) : '');
+}
+const INVOICE_LINE_DESC = 'Aviation consultancy & Pilot services';
+// One fee line per day worked: the days the legs are flown if there are legs, otherwise every day of the job.
+function workDays(j) {
+  const legDays = [...new Set((j.legs || []).map(l => l.date).filter(Boolean))].sort();
+  if (legDays.length) return legDays.slice(0, 30);
+  if (!j.startDate) return [''];
+  const out = []; for (let d = j.startDate, n = 0; d && n < 30 && d <= (j.endDate || j.startDate); d = addDaysISO(d, 1), n++) out.push(d);
+  return out.length ? out : [j.startDate];
+}
 function newInvoiceFor(j) {
   const c = clientOf(j && j.clientId), rate = (c && c.rate) || '';
-  return { id: '', jobId: j ? j.id : '', jobTitle: j ? jobTitle(j) : '', clientId: (j && j.clientId) || '', issueDate: todayISO(), dueDate: '', status: 'draft', number: '', notes: '',
-    lines: [{ auto: !!rate, desc: j ? 'Day rate – ' + jobTitle(j) + (dateRange(j) ? ' (' + dateRange(j).replace(/<[^>]+>/g, '') + ')' : '') : '', qty: j ? jobDays(j) : 1, rate: rate }], expenses: [] };
+  const e = { id: '', jobId: j ? j.id : '', jobTitle: j ? jobTitle(j) : '', clientId: (j && j.clientId) || '', issueDate: todayISO(), dueDate: '', status: 'draft', number: '', notes: '',
+    lines: (j ? workDays(j) : ['']).map(d => ({ auto: !!rate, desc: INVOICE_LINE_DESC, date: d, qty: 1, rate: rate })), expenses: [] };
+  return e;
 }
 function invRow(i) {
   const st = invState(i);
@@ -1630,7 +1749,7 @@ function renderInvoice(app) {
   ensureDir();
   const e = S.invEdit;
   if (!e) { S.openId = null; return render(); }
-  const head = '<header class="bar"><button class="btn ghost" data-act="inv-close">← Back</button><b>' + (e.number ? esc(e.number) : 'New invoice') + '</b>' +
+  const head = '<header class="bar"><button class="btn ghost" data-act="inv-close">← Back</button><b>' + (e.number && e.status !== 'draft' ? esc(e.number) : e.id && e.number ? esc(e.number) : 'New invoice') + '</b>' +
     (e.status !== 'draft' ? '<span class="badge ' + (e.status === 'paid' ? 'confirmed' : 'tentative') + '">' + esc(invState(e)) + '</span>' : '') + '</header>';
   const dis = e.status !== 'draft';
   const cl = S.dir.clients || [];
@@ -1648,12 +1767,13 @@ function renderInvoice(app) {
       cl.map(c => '<option value="' + c.id + '"' + (e.clientId === c.id ? ' selected' : '') + '>' + esc(c.name) + '</option>').join('') + '</select></label>' +
       (cl.length ? '' : '<p class="small">No clients yet. Add one under Setup → Clients.</p>') +
       '<div class="grid2">' + fld('Invoice date', 'data-iv="issueDate"', e.issueDate, 'date') + fld('Due date (blank = usual terms)', 'data-iv="dueDate"', e.dueDate, 'date') + '</div>' +
-      '<h3>Fees</h3>' + e.lines.map((l, k) => '<div class="ivrow" data-k="lines" data-i="' + k + '">' + fld('Description', 'data-nocaps data-iv="desc"', l.desc) +
+      '<p class="small">' + (e.id && e.number ? 'Reference: <b>' + esc(e.number) + '</b>. ' : '') + 'The reference is made for you: the client\u2019s initials and the invoice date.</p>' +
+      '<h3>Fees</h3>' + e.lines.map((l, k) => '<div class="ivrow" data-k="lines" data-i="' + k + '">' + fld('Description', 'data-nocaps data-iv="desc"', l.desc) + fld('Date', 'data-iv="date"', l.date || '', 'date') +
         '<div class="grid3">' + fld('Days / qty', 'data-iv="qty" inputmode="decimal"', l.qty) + fld('Rate £', 'data-iv="rate" inputmode="decimal"', l.rate) +
         '<div class="fld"><span>Amount</span><div class="amt" data-amt>' + money((parseFloat(l.qty) || 0) * (parseFloat(l.rate) || 0)) + '</div></div></div>' +
         '<button class="linkbtn" data-act="inv-rm" data-k="lines" data-i="' + k + '">Remove</button></div>').join('') +
       '<button class="btn" data-act="inv-add" data-k="lines">+ Add a fee line</button>' +
-      '<h3>Expenses passed on to the client</h3>' + e.expenses.map((x, k) => '<div class="ivrow" data-k="expenses" data-i="' + k + '">' + fld('What for', 'data-nocaps data-iv="desc"', x.desc) +
+      '<h3>Expenses passed on to the client</h3>' + e.expenses.map((x, k) => '<div class="ivrow" data-k="expenses" data-i="' + k + '">' + fld('What for', 'data-nocaps data-iv="desc"', x.desc) + fld('Date', 'data-iv="date"', x.date || '', 'date') +
         '<div class="grid2">' + fld('Amount £', 'data-iv="amount" inputmode="decimal"', x.amount) + '<div class="fld"><span>&nbsp;</span><button class="linkbtn" data-act="inv-rm" data-k="expenses" data-i="' + k + '">Remove</button></div></div></div>').join('') +
       '<button class="btn" data-act="inv-add" data-k="expenses">+ Add an expense</button>' +
       '<p class="invtotal">Total <b id="ivTotal">' + money(invTotal(e)) + '</b></p>' +
@@ -1664,12 +1784,12 @@ function renderInvoice(app) {
   const btn = (act, txt, cls) => '<button class="btn ' + (cls || '') + ' block" data-act="' + act + '">' + txt + '</button>';
   let acts = '';
   if (dis) {
-    acts = btn('inv-pdf', 'Download PDF') +
+    acts = btn('inv-xlsx', 'Download Excel invoice') + btn('inv-pdf', 'Download PDF') +
       (e.status === 'sent' ? btn('inv-gmail', 'Email me a payment reminder to forward', st === 'overdue' ? 'primary' : '') + btn('inv-paid', 'Mark as paid', 'good') : '') +
       (e.status === 'paid' ? btn('inv-unpaid', 'Mark as not paid') : '') +
       (e.status !== 'void' ? btn('inv-void', 'Void this invoice', 'danger') : '');
   } else {
-    acts = btn('inv-save', 'Save', 'primary') + btn('inv-gmail', 'Email me this invoice to check and forward') + btn('inv-pdf', 'Download PDF') +
+    acts = btn('inv-save', 'Save', 'primary') + btn('inv-gmail', 'Email me this invoice to check and forward') + btn('inv-xlsx', 'Download Excel invoice') + btn('inv-pdf', 'Download PDF') +
       (id ? btn('inv-sent', 'I’ve sent it – mark as sent', 'good') + btn('inv-del', 'Delete this draft', 'danger') : '');
   }
   app.innerHTML = head + '<main class="detail">' + (e.jobTitle ? '<p class="small">Job: ' + esc(e.jobTitle) + '</p>' : '') + body + '<p class="small" id="ivErr" style="color:var(--danger)"></p>' + acts +
@@ -1684,7 +1804,9 @@ document.addEventListener('input', e => {
     const it = S.invEdit[row.dataset.k][+row.dataset.i]; if (!it) return;
     it[k] = el.value; if (k === 'rate') delete it.auto;
     const amt = row.querySelector('[data-amt]'); if (amt) amt.textContent = money((parseFloat(it.qty) || 0) * (parseFloat(it.rate) || 0));
-  } else S.invEdit[k] = el.value;
+  } else {
+    S.invEdit[k] = el.value;
+  }
   const t = $('#ivTotal'); if (t) t.textContent = money(invTotal(S.invEdit));
   if (k === 'clientId') {   // the client's own rate, if set, replaces an empty rate
     const c = clientOf(el.value), r = (c && c.rate) || '';   // each client has their own day rate: refill rates that came from a client, never ones typed by hand
@@ -1718,9 +1840,14 @@ Object.assign(actions, {
   'inv-pdf'() {
     busy(async () => { const s = await invSaveNow(); const r = await api('getInvoicePdf', s.id); const a = document.createElement('a'); a.href = URL.createObjectURL(b64blob(r.base64, 'application/pdf')); a.download = r.name; document.body.appendChild(a); a.click(); a.remove(); render(); }).catch(invFail);
   },
+  'inv-xlsx'() {
+    busy(async () => { const s = await invSaveNow(); const f = await makeInvoiceXlsx(s);
+      if (!f) { toast('The invoice template (' + INVOICE_TEMPLATE_URL + ') isn’t on this site yet – upload it next to index.html. Use Download PDF for now.', 'err'); return; }
+      const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([f.bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })); a.download = f.name; document.body.appendChild(a); a.click(); a.remove(); render(); }).catch(invFail);
+  },
   'inv-gmail'() {
     const reminder = S.invEdit.status !== 'draft';
-    busy(async () => { const s = await invSaveNow(); const r = await api('emailInvoice', s.id, reminder ? 'reminder' : 'invoice'); invSet(r.invoice); render();
+    busy(async () => { const s = await invSaveNow(); const f = await makeInvoiceXlsx(s); const r = await api('emailInvoice', s.id, reminder ? 'reminder' : 'invoice', f ? { name: f.name, base64: f.base64 } : null); invSet(r.invoice); render();
       toast('Emailed to you at ' + r.sentTo + ' – check it, then forward it to the client.', ''); }).catch(invFail);
   },
   'inv-sent'() { busy(async () => { await invSaveNow(); invSet(await api('setInvoiceStatus', S.invEdit.id, 'sent')); await afterInvChange(); toast('Marked as sent', ''); }).catch(invFail); },
@@ -1889,7 +2016,7 @@ function importPayload(g) {
   if (g.status === 'confirmed') {
     data.flights = [newFlight('out'), newFlight('return')];
     data.stays = [{ id: uid(), location: '', checkIn: g.start, checkOut: outFor(g.start, g.end), ref: '', booked: false }];
-    data.legs = g.legs.map(l => Object.assign(newLeg(l.date), { from: l.from, to: l.to, route: l.from + ' > ' + l.to, time: l.time, dest: icaoCountry(l.to) || 'UK' }));
+    data.legs = g.legs.map(l => Object.assign(newLeg(l.date), { from: l.from, to: l.to, route: l.from + ' > ' + l.to, time: l.time }));
     data.tasks = POST_FLIGHT_TASKS();
   } else {
     data.notes = [g.notes].concat(g.legs.map(l => l.from + ' > ' + l.to + (l.date ? ' ' + l.date : '') + (l.time ? ' ' + l.time + 'Z' : ''))).filter(Boolean).join('\n');
@@ -1934,7 +2061,7 @@ function renderImport(app) {
         '<span class="chip ' + g.status + '">' + g.status + '</span></div><div class="item-sub">' +
         (g.dup ? '<p class="fpstat prompt">Looks like a job you already have (same title and start date), so it’s unticked.</p>' : '') +
         g.legs.map(l => '<div class="small">' + esc(l.from + ' → ' + l.to) + ' · ' + esc(l.date ? fmtDate(l.date) : 'no date') + (l.time ? ' ' + l.time + 'Z' : '') +
-          (g.status === 'confirmed' ? ' · GAR rule: ' + ({ UK: 'UK', FR: 'France', OTHER: 'none' }[icaoCountry(l.to)] || 'UK') : '') + '</div>').join('') +
+          (g.status === 'confirmed' ? ' · ' + (garSteps(l).map(s => s.label.replace(' submitted', '')).join(' + ') || 'no GAR needed') : '') + '</div>').join('') +
         (g.status === 'tentative' ? '<div class="small">Tentative: the legs are saved in the notes.</div>' : '') + '</div></div>').join('');
       if (imp.issues.length) body += '<section class="sect"><h3>Check these</h3>' + imp.issues.map(t => '<p class="fpstat prompt">' + esc(t) + '</p>').join('') + '</section>';
       const n = imp.groups.filter(g => g.pick).length;
@@ -1957,7 +2084,7 @@ async function importGo() {
   S.imp = null; S.openId = null; S.tab = 'active'; render();
   toast('Imported ' + done + ' job' + (done === 1 ? '' : 's') + ' – confirmed ones are on your calendar', '');
 }
-if (window.PILOT_MOCK) window.PILOT_TEST = { clashesFor, spanOf, parseGarPeople, splitDelimited, newInvoiceFor, invTotal, chaseItems, invState, parseImport, cellDate, cellTime, importFile, garData, fillGarXlsx, sortedPeople };   // lets the automated tests reach the import helpers
+if (window.PILOT_MOCK) window.PILOT_TEST = { clashesFor, spanOf, parseGarPeople, splitDelimited, newInvoiceFor, invTotal, fillInvoiceXlsx, invoiceXlsxData, ordinalDate, addressLines, workDays, chaseItems, invState, parseImport, cellDate, cellTime, importFile, garData, fillGarXlsx, sortedPeople, garNeeds, garSteps, legRule, legStatus, icaoJur, autoJob, suggestRef, plusHour };   // lets the automated tests reach the import helpers
 document.addEventListener('change', e => {
   const el = e.target;
   if (el.dataset && el.dataset.addperson && el.value && S.openId) {            // add a crew member / passenger to a leg
